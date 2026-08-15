@@ -1,4 +1,4 @@
-//! The local end of `sva shell`: this terminal, in raw mode.
+//! The local end of `sv shell`: this terminal, in raw mode.
 //!
 //! Port of `src/localTerminal.ts`, which is the same four platform calls Node
 //! makes underneath: `tcgetattr`/`tcsetattr` for raw mode, `TIOCGWINSZ` for the

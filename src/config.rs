@@ -28,7 +28,7 @@ pub const SCOPES: [&str; 4] = ["openid", "profile", "email", "offline_access"];
 
 /// `ID-6`/`ID-7`: the only two loopback callbacks Svartal accepts, in
 /// preference order. A third port would be refused by the provider, so this
-/// list is not a free choice. Two entries mean a second `sva login` can
+/// list is not a free choice. Two entries mean a second `sv login` can
 /// still run while the first port is held.
 pub const REDIRECT_URIS: [&str; 2] =
     ["http://127.0.0.1:5733/auth/callback", "http://127.0.0.1:5734/auth/callback"];

@@ -23,7 +23,7 @@ impl std::fmt::Display for ApiError {
             Self::Failed { action, .. } => write!(f, "Could not {action}."),
             Self::Unauthorized { action } => write!(
                 f,
-                "Svartal refused the request to {action}. Run `sva login` and try again."
+                "Svartal refused the request to {action}. Run `sv login` and try again."
             ),
         }
     }

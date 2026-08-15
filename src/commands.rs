@@ -39,7 +39,7 @@ impl CliError {
 /// The message a command that reads data gives when nobody is signed in. It
 /// never opens a browser on its own: a listing should not take over the
 /// terminal.
-pub const NOT_SIGNED_IN: &str = "You are not signed in to Svartal. Run `sva login`.";
+pub const NOT_SIGNED_IN: &str = "You are not signed in to Svartal. Run `sv login`.";
 
 pub struct Context<'a> {
     pub config: Config,
@@ -81,7 +81,7 @@ fn display_name(session: &Session) -> String {
 
 pub fn login(context: &Context<'_>, out: &mut dyn Write) -> Result<(), CliError> {
     // A stored credential that cannot be verified is exactly the case
-    // `sva login` exists to repair, so a failure here must not stop the
+    // `sv login` exists to repair, so a failure here must not stop the
     // command.
     let existing = context.client(0)?.existing_session().unwrap_or(None);
     if let Some(session) = existing {
@@ -126,7 +126,7 @@ fn sign_in(context: &Context<'_>, out: &mut dyn Write) -> Result<Session, CliErr
             .map_err(CliError::of);
     }
     Err(CliError(format!(
-        "Every sign-in callback port is in use ({}). Close whatever is holding them and run `sva login` again.",
+        "Every sign-in callback port is in use ({}). Close whatever is holding them and run `sv login` again.",
         ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
     )))
 }
@@ -183,7 +183,7 @@ pub fn machines(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Resul
     Ok(())
 }
 
-/// `sva shell <machine-or-workspace>`.
+/// `sv shell <machine-or-workspace>`.
 ///
 /// Resolve, connect, then hand the terminal over. The remote shell is
 /// deliberately left running when the CLI exits: reattaching is the normal

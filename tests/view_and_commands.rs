@@ -333,7 +333,7 @@ fn a_command_that_reads_data_never_opens_a_browser_when_nobody_is_signed_in() {
     let (outcome, output, urls) =
         harness.run(false, |context, out| commands::whoami(context, out, false));
     let error = outcome.unwrap_err();
-    assert!(error.to_string().contains("sva login"));
+    assert!(error.to_string().contains("sv login"));
     assert!(output.is_empty());
     assert!(urls.is_empty());
 }

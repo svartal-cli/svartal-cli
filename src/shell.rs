@@ -1,4 +1,4 @@
-//! `sva shell`: a plain PTY in a Svartal workspace, over the relay.
+//! `sv shell`: a plain PTY in a Svartal workspace, over the relay.
 //!
 //! Port of `src/shell.ts`. The path is the one the TypeScript CLI's NOTES.md
 //! wrote down: relay token exchange, relay connect, workspace token exchange,
@@ -94,7 +94,7 @@ fn terminal_call_error(error: &RpcError, label: &str, subject: &str) -> ShellErr
     connection_error(label, error)
 }
 
-/// The terminal id `sva shell <target>` uses.
+/// The terminal id `sv shell <target>` uses.
 ///
 /// Derived from the workspace id, so it is the same on every run and from every
 /// device: reconnecting reattaches instead of piling up abandoned PTYs. It is

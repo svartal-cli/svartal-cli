@@ -38,11 +38,11 @@ impl std::fmt::Display for RelayError {
         match self {
             Self::ClientRefused { client_id, .. } => write!(
                 f,
-                "The Svartal relay refused the {client_id} client. Terminal connections are not enabled on this relay yet, so `sva shell` cannot reach a workspace from here."
+                "The Svartal relay refused the {client_id} client. Terminal connections are not enabled on this relay yet, so `sv shell` cannot reach a workspace from here."
             ),
             Self::ConnectRefused { label, status } if *status == 404 => write!(
                 f,
-                "The Svartal relay does not know a workspace called {label}. Run `sva machines` to see what you can reach."
+                "The Svartal relay does not know a workspace called {label}. Run `sv machines` to see what you can reach."
             ),
             Self::ConnectRefused { label, .. } => write!(
                 f,
