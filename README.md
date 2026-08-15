@@ -1,19 +1,15 @@
 # svartal-cli
 
-The Svartal terminal CLI, in Rust. The repository and crate are `svartal-cli`; the installed command is `svartal`. The bare `svartal` name belongs to the platform, not to any one program.
-
-`svartal` signs you in to Svartal from a terminal, tells you who you are, and
-lists the machines and workspaces you can reach. It exists so the program that
-holds a refresh token and a DPoP signing key is a small static binary with an
-auditable dependency set, rather than a Node package on top of a package tree
-nobody can read in an afternoon. That is the same argument brok makes for the
-machine-side broker.
+`sv` signs you in to Svartal from a terminal, tells you who you are, lists the
+machines and workspaces you can reach, and opens shells on them. It exists so
+the program that holds a refresh token and a DPoP signing key is a small
+static binary with an auditable dependency set. That is the same argument brok
+makes for the machine-side broker.
 
 The npm package [`@svartal/cli`](https://www.npmjs.com/package/@svartal/cli)
-(`ivaldi/packages/svartal-cli`) is the **TypeScript reference
-implementation**. It works, it is in production, and this port is measured
-against it: same commands, same tables, same sentences, same exit codes, and
-the same credential file on disk.
+(`ivaldi/packages/svartal-cli`) is the reference implementation. It works, it
+is in production, and this port is measured against it: same commands, same
+tables, same sentences, same exit codes, and the same credential file on disk.
 
 The contract both implementations follow is
 `ivaldi/packages/svartal-client/SVARTAL-CONNECT.md`. The requirement numbers in
@@ -53,22 +49,22 @@ Known differences, all deliberate:
 
 ```sh
 cargo build --release
-install -m 755 target/release/svartal /usr/local/bin/svartal
+install -m 755 target/release/sv /usr/local/bin/sv
 ```
 
 ## Use
 
 ```sh
-svartal login            # opens a browser; --no-browser prints the URL instead
-svartal whoami
-svartal machines
-svartal sessions workbench
-svartal shell workbench  # or a workspace name, or a workspace id
-svartal logout
+sv login            # opens a browser; --no-browser prints the URL instead
+sv whoami
+sv machines
+sv sessions workbench
+sv shell workbench  # or a workspace name, or a workspace id
+sv logout
 ```
 
-`svartal shell` opens (or picks back up) one shell per workspace. The terminal
-id is derived from the workspace id, so running it again from anywhere lands in
+`sv shell` opens (or picks back up) one shell per workspace. The terminal id
+is derived from the workspace id, so running it again from anywhere lands in
 the same shell; `--terminal-id <id>` opens a second, separate one. Quitting the
 CLI **detaches** — the remote shell keeps running, and the closing line says so.
 Ending it is an explicit `exit` or Ctrl-D.
@@ -172,9 +168,3 @@ serialization over a WebSocket: one JSON value per frame, `Request` /  `Ack` /
 as strings. The rule worth knowing is that **every `Chunk` must be answered with
 an `Ack`** — the socket protocol advertises `supportsAck`, and a client that
 does not ack goes quiet mid-session once the server's window fills.
-
-## Licence
-
-MIT, matching brok — but the licence is Marc's call, not this repository's:
-knit, gloss, urdir and sej are all Apache-2.0, so this is pending his choice.
-See `LICENSE`.

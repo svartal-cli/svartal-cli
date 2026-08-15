@@ -1,11 +1,11 @@
 //! Turning what a person typed into one workspace to connect to.
 //!
-//! Port of `src/target.ts`. `svartal shell <target>` takes whatever the person
+//! Port of `src/target.ts`. `sv shell <target>` takes whatever the person
 //! has in front of them — a machine name, a workspace label, or a workspace id
 //! — and has to end at exactly one environment id. Anything else is a question,
 //! not a guess: two matches are listed back, and no match says so.
 //!
-//! The input is the same joined view `svartal machines` prints, so the CLI
+//! The input is the same joined view `sv machines` prints, so the CLI
 //! never resolves against data the person could not have seen.
 
 use crate::view::{MachinesView, WorkspaceRow, render_table};
@@ -41,7 +41,7 @@ impl std::fmt::Display for TargetError {
             ),
             Self::Unknown { argument, reachable } if reachable.is_empty() => write!(
                 f,
-                "No workspace called {argument}. You cannot reach any workspace yet; run `svartal machines` to see what exists."
+                "No workspace called {argument}. You cannot reach any workspace yet; run `sv machines` to see what exists."
             ),
             Self::Unknown { argument, reachable } => write!(
                 f,

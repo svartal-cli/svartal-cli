@@ -104,7 +104,7 @@ impl StoredTokens {
     /// Parse a stored token set. Anything that is not exactly the shape in
     /// `ID-20` is `None`, which the caller treats as "not signed in" — the
     /// same fail-quiet the reference client applies, because a person with a
-    /// corrupt credential file wants `svartal login` to fix it, not a parse
+    /// corrupt credential file wants `sv login` to fix it, not a parse
     /// error.
     pub fn parse(raw: &str) -> Option<Self> {
         let mut tokens: Self = serde_json::from_str(raw).ok()?;

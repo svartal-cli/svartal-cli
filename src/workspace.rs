@@ -35,7 +35,7 @@ pub const TERMINAL_OPERATE_SCOPE: &str = "terminal:operate";
 /// terminal-only token cannot finish connecting.
 pub const ORCHESTRATION_READ_SCOPE: &str = "orchestration:read";
 
-/// The scopes `svartal shell` asks for, in the order the TypeScript CLI sends
+/// The scopes `sv shell` asks for, in the order the TypeScript CLI sends
 /// them. Both are load-bearing; see `ORCHESTRATION_READ_SCOPE`.
 pub const SHELL_SCOPES: [&str; 2] = [TERMINAL_OPERATE_SCOPE, ORCHESTRATION_READ_SCOPE];
 
