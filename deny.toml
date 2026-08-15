@@ -1,0 +1,31 @@
+# Dependency policy for the Svartal CLI, mirroring brok's. The whole point of
+# this binary is a small, auditable set of crates around a refresh token and a
+# signing key, so this file is the enforced version of that rule: run
+# `cargo deny check` before adding a dependency.
+
+[advisories]
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Nothing in a credential-holding CLI should need these. TLS is rustls, once.
+deny = [
+  { name = "openssl" },
+  { name = "openssl-sys" },
+  { name = "native-tls" },
+  # No async runtime: every call this program makes is sequential, and the
+  # shell's byte pump is one thread with a socket read timeout.
+  { name = "tokio" },
+]
+
+[licenses]
+# CDLA-Permissive-2.0 covers webpki-roots (the Mozilla CA bundle rustls uses);
+# it is a permissive data license, not a code copyleft.
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "CDLA-Permissive-2.0"]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

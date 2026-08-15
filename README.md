@@ -28,11 +28,12 @@ the source comments (`ID-9`, `ID-16`, `ID-25`, …) are that document's.
 | `whoami`            | yes                | yes         | `--json` too                                                           |
 | `machines`          | yes                | yes         | `--json` too                                                           |
 | `sessions [machine]`| partial            | partial     | lists reachable workspaces; live agent sessions are not readable with a terminal sign-in yet |
-| `shell <target>`    | yes                | **not yet** | phase 2: the relay connect calls are here, the WebSocket and PTY are not |
+| `shell <target>`    | yes                | yes         | full connect chain, detached terminal namespace, raw-mode byte pump, reattach; `--terminal-id` too |
 
 Verified against the npm CLI on the same machine and the same credential:
 `whoami`, `whoami --json`, `machines`, `machines --json` and `sessions --json`
-produce byte-identical output.
+produce byte-identical output, and `shell` prints the same lines on the same
+workspace (including reattach).
 
 Known differences, all deliberate:
 
@@ -44,6 +45,9 @@ Known differences, all deliberate:
 * `login` keeps the PKCE transaction in memory as a value rather than in a
   storage slot, so "consume it before validating anything" (`ID-12`) is
   enforced by the type system.
+* `shell` sends each keystroke without waiting for the workspace to acknowledge
+  the previous one. The reference awaits every write; on a terminal that is a
+  round trip per keypress, and nothing observable depends on it.
 
 ## Install
 
@@ -59,8 +63,15 @@ svartal login            # opens a browser; --no-browser prints the URL instead
 svartal whoami
 svartal machines
 svartal sessions workbench
+svartal shell workbench  # or a workspace name, or a workspace id
 svartal logout
 ```
+
+`svartal shell` opens (or picks back up) one shell per workspace. The terminal
+id is derived from the workspace id, so running it again from anywhere lands in
+the same shell; `--terminal-id <id>` opens a second, separate one. Quitting the
+CLI **detaches** — the remote shell keeps running, and the closing line says so.
+Ending it is an explicit `exit` or Ctrl-D.
 
 Configuration is environment variables, all optional:
 
@@ -107,9 +118,13 @@ audited.
 | `base64`     | base64url without padding, everywhere.                                        |
 | `url`        | WHATWG URL parsing. Load-bearing: the redirect allowlist, the same-origin discovery check, the callback match and the DPoP `htu` are all comparisons against what a browser would produce. |
 | `getrandom`  | OS entropy for `state`, `nonce`, the PKCE verifier, the key and `jti`.        |
+| `tungstenite` | The WebSocket `shell` runs over: blocking client, rustls, no async runtime. Brings ten crates of its own (`http`, `httparse`, `sha1`, `rand`, `bytes`, `data-encoding`, `thiserror`, …). Hand-rolling RFC 6455 framing would have added none, at the cost of about 350 lines of masking, fragmentation and close-handshake code to audit; a reviewed implementation of a security-relevant wire format won that trade. |
+| `libc`       | `termios` (raw mode), `TIOCGWINSZ`, `SIGWINCH`, `isatty`. Four calls, no terminal framework. |
 
-No tokio, no OpenSSL, no HTTP framework. The loopback callback server is about
-a hundred lines of `std::net`.
+No tokio, no OpenSSL, no HTTP framework, and one TLS implementation rather than
+two — `tungstenite` uses the same rustls and the same root store `ureq` links.
+The loopback callback server is about a hundred lines of `std::net`.
+`cargo deny check` enforces this: see `deny.toml`.
 
 ## Tests
 
@@ -125,12 +140,14 @@ The cross-implementation formats are pinned by fixtures generated from the
 | --------------------------- | ------------------------------------- | -------------------------------------------------------- |
 | `tests/fixtures/dpop.json`  | ivaldi's `createDpopProof`            | the DPoP proof's signing input, byte for byte             |
 | `tests/fixtures/oidc.json`  | `jose`, the library the reference client verifies with | discovery, JWKS, and every token rule in `ID-16` |
+| `tests/fixtures/shell.json` | ivaldi's real `openShellSession` / `runShellPump` | the four HTTP requests of the connect chain, each DPoP proof's claims, and every WebSocket frame — the whole `shell` wire contract |
 
 Regenerate them with Node ≥ 24 (it reads the TypeScript sources directly):
 
 ```sh
 node tests/fixtures/generate-dpop.mjs tests/fixtures ../ivaldi/packages/shared
 node tests/fixtures/generate-oidc.mjs tests/fixtures ../ivaldi/packages/svartal-cli
+node tests/fixtures/generate-shell.mjs tests/fixtures ../ivaldi/packages/svartal-cli
 ```
 
 ECDSA as WebCrypto performs it is randomized, so a whole proof cannot be
@@ -146,6 +163,18 @@ node tests/fixtures/generate-dpop.mjs --verify /tmp/rust-dpop.json
 Nothing in the fixtures is real: throwaway keys, `example.com` hosts, and
 tokens signed for an issuer that does not exist.
 
+## The shell protocol
+
+`src/rpc.rs` documents the wire format `shell` speaks, because nothing else
+does. It is Effect's RPC protocol (`effect/unstable/rpc`) with JSON
+serialization over a WebSocket: one JSON value per frame, `Request` /  `Ack` /
+`Interrupt` / `Ping` out, `Chunk` / `Exit` / `Pong` / `Defect` back, request ids
+as strings. The rule worth knowing is that **every `Chunk` must be answered with
+an `Ack`** — the socket protocol advertises `supportsAck`, and a client that
+does not ack goes quiet mid-session once the server's window fills.
+
 ## Licence
 
-MIT. See `LICENSE`.
+MIT, matching brok — but the licence is Marc's call, not this repository's:
+knit, gloss, urdir and sej are all Apache-2.0, so this is pending his choice.
+See `LICENSE`.
