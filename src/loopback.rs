@@ -91,7 +91,7 @@ pub struct LoopbackServer {
 
 impl LoopbackServer {
     /// Bind one of the registered callbacks. `PortInUse` is the signal to try
-    /// the next one, so a second `sv login` can still sign in while the
+    /// the next one, so a second `sva login` can still sign in while the
     /// first port is held.
     pub fn bind(redirect: &LoopbackRedirect) -> Result<Self, LoopbackError> {
         Self::bind_to(&redirect.host, redirect.port, &redirect.pathname)

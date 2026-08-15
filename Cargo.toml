@@ -12,7 +12,7 @@ name = "svartal"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sv"
+name = "sva"
 path = "src/main.rs"
 
 # This binary holds a refresh token and a DPoP signing key, so the dependency

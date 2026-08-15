@@ -1,6 +1,6 @@
 # svartal-cli
 
-`sv` signs you in to Svartal from a terminal, tells you who you are, lists the
+`sva` signs you in to Svartal from a terminal, tells you who you are, lists the
 machines and workspaces you can reach, and opens shells on them. It exists so
 the program that holds a refresh token and a DPoP signing key is a small
 static binary with an auditable dependency set. That is the same argument brok
@@ -49,21 +49,21 @@ Known differences, all deliberate:
 
 ```sh
 cargo build --release
-install -m 755 target/release/sv /usr/local/bin/sv
+install -m 755 target/release/sva /usr/local/bin/sva
 ```
 
 ## Use
 
 ```sh
-sv login            # opens a browser; --no-browser prints the URL instead
-sv whoami
-sv machines
-sv sessions workbench
-sv shell workbench  # or a workspace name, or a workspace id
-sv logout
+sva login            # opens a browser; --no-browser prints the URL instead
+sva whoami
+sva machines
+sva sessions workbench
+sva shell workbench  # or a workspace name, or a workspace id
+sva logout
 ```
 
-`sv shell` opens (or picks back up) one shell per workspace. The terminal id
+`sva shell` opens (or picks back up) one shell per workspace. The terminal id
 is derived from the workspace id, so running it again from anywhere lands in
 the same shell; `--terminal-id <id>` opens a second, separate one. Quitting the
 CLI **detaches** — the remote shell keeps running, and the closing line says so.

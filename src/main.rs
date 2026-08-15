@@ -3,7 +3,7 @@
 //!
 //! Every failure this CLI produces already carries a sentence written for the
 //! person running it, so the top level prints that sentence and nothing else.
-//! That is the difference between "run `sv login`" and a page of frames.
+//! That is the difference between "run `sva login`" and a page of frames.
 
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -16,7 +16,7 @@ use svartal::store::FileTokenStorage;
 
 const USAGE: &str = "Work with your Svartal machines from the terminal.
 
-Usage: sv <command> [options]
+Usage: sva <command> [options]
 
 Commands:
   login              Sign in to Svartal in this terminal.
@@ -40,7 +40,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             let mut stderr = std::io::stderr();
-            writeln!(stderr, "sv: {message}").ok();
+            writeln!(stderr, "sva: {message}").ok();
             ExitCode::FAILURE
         }
     }
@@ -62,7 +62,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
             return Err("no command given.".to_string());
         }
         "-V" | "--version" => {
-            writeln!(stdout, "sv v{}", env!("CARGO_PKG_VERSION")).ok();
+            writeln!(stdout, "sva v{}", env!("CARGO_PKG_VERSION")).ok();
             return Ok(());
         }
         _ => {}
@@ -123,7 +123,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
         "shell" => {
             let Some(target) = positional.first().copied() else {
                 return Err(
-                    "`sv shell` needs a machine or workspace to connect to. Run `sv machines` to see them.".to_string(),
+                    "`sva shell` needs a machine or workspace to connect to. Run `sva machines` to see them.".to_string(),
                 );
             };
             commands::shell(&context, &mut stdout, target, terminal_id.as_deref())

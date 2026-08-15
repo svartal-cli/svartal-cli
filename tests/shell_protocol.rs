@@ -1,4 +1,4 @@
-//! `sv shell`, pinned to the TypeScript implementation.
+//! `sva shell`, pinned to the TypeScript implementation.
 //!
 //! `tests/fixtures/shell.json` was recorded by driving ivaldi's real
 //! `openShellSession` / `runShellPump` against a stubbed relay, a stubbed
