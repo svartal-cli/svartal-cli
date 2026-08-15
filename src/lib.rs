@@ -22,6 +22,7 @@ pub mod http;
 pub mod jwt;
 pub mod loopback;
 pub mod oidc;
+pub mod relay;
 pub mod store;
 pub mod view;
 
