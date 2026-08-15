@@ -1,0 +1,66 @@
+[package]
+name = "svartal"
+version = "0.1.0"
+edition = "2024"
+description = "The Svartal terminal CLI: sign in, list machines, and (later) open a shell on a workspace. Rust port of the npm @svartal/cli."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "svartal"
+path = "src/main.rs"
+
+# This binary holds a refresh token and a DPoP signing key, so the dependency
+# set is part of the product: every crate here has to justify itself, and the
+# first choice is always whatever brok (the other credential-holding Rust
+# binary in this workspace) already audited.
+[dependencies]
+# Deserializing the OIDC, Svartal API and relay responses. Same version brok uses.
+serde = { version = "1", features = ["derive"] }
+# `preserve_order`: JWT claim order is part of the signed bytes, so a map that
+# reorders keys would produce a proof the TypeScript verifier still accepts but
+# whose bytes no fixture could pin.
+serde_json = { version = "1", features = ["preserve_order"] }
+# Blocking HTTPS client, rustls (no OpenSSL). brok's choice; a CLI command is a
+# handful of sequential requests, so an async runtime would buy nothing.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+# base64url without padding: every JWT segment, PKCE challenge, JWK coordinate.
+base64 = "0.22"
+# SHA-256: PKCE S256, RFC 7638 thumbprint, DPoP `ath`, RS256 digest.
+sha2 = "0.10"
+# ES256 (P-256 ECDSA) for the DPoP proof key. The one crate brok does not
+# already carry; RustCrypto, same family as sha2, no C code.
+p256 = "0.13"
+# RS256 verification of the OIDC access and ID tokens against JWKS (ID-16).
+# `ring` is already in this binary: it is the crypto provider rustls uses for
+# TLS. Verifying the tokens with it instead of pulling a second RSA stack adds
+# zero crates and puts token verification on the same code TLS already trusts.
+# `RsaPublicKeyComponents` takes the raw JWKS `n`/`e`, so no DER is involved.
+ring = "0.17"
+# WHATWG URL parsing. Load-bearing, not a convenience: the redirect allowlist
+# (ID-6), the same-origin discovery check (ID-9), the callback match (ID-13)
+# and the DPoP `htu` are all string comparisons against what a browser and
+# JavaScript's `new URL()` would produce. brok already depends on it.
+url = "2"
+# OS entropy for `state`, `nonce`, the PKCE verifier, the DPoP key and `jti`.
+# The `rand` generators are not needed: nothing here wants a PRNG, only the
+# kernel's.
+getrandom = "0.2"
+
+# Tests reach for the same crates the library already uses: the fixtures are
+# JSON, and proving a proof verifies means doing P-256 verification here.
+[dev-dependencies]
+base64 = "0.22"
+p256 = "0.13"
+serde_json = { version = "1", features = ["preserve_order"] }
+url = "2"
+
+# A credential-holding CLI ships as one small binary. These are the standard
+# knobs, not tuning: link-time optimization across one codegen unit, no symbol
+# table, and no unwinding (a panic in this program is a bug, and there is
+# nothing to unwind into).
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
