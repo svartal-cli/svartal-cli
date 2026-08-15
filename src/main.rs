@@ -73,20 +73,23 @@ fn run(arguments: &[String]) -> Result<(), String> {
         _ => {}
     }
 
+    // Each command takes the flags it takes. A `--json` on `login` is a
+    // misunderstanding worth saying out loud, not something to ignore.
+    let accepted: &[&str] = match command {
+        "login" => &["--no-browser"],
+        "whoami" | "machines" | "sessions" => &["--json"],
+        _ => &[],
+    };
     let rest = &arguments[1..];
-    let json = rest.iter().any(|argument| argument == "--json");
-    let no_browser = rest.iter().any(|argument| argument == "--no-browser");
-    let positional: Vec<&str> = rest
-        .iter()
-        .filter(|argument| !argument.starts_with("--"))
-        .map(String::as_str)
-        .collect();
-    if let Some(unknown) = rest
-        .iter()
-        .find(|argument| argument.starts_with("--") && *argument != "--json" && *argument != "--no-browser")
+    if let Some(unknown) =
+        rest.iter().find(|argument| argument.starts_with('-') && !accepted.contains(&argument.as_str()))
     {
         return Err(format!("{unknown} is not an option `svartal {command}` takes."));
     }
+    let json = rest.iter().any(|argument| argument == "--json");
+    let no_browser = rest.iter().any(|argument| argument == "--no-browser");
+    let positional: Vec<&str> =
+        rest.iter().filter(|argument| !argument.starts_with('-')).map(String::as_str).collect();
 
     let environment = environment_from_process();
     let config = resolve_config(&environment).map_err(|error| error.to_string())?;
