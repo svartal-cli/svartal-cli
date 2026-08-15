@@ -12,9 +12,13 @@
 //! `whoami`, `machines`, `sessions`, plus the DPoP key and the two relay calls
 //! `shell` will need. The interactive shell itself is phase 2.
 
+pub mod browser;
 pub mod config;
 pub mod fsutil;
 pub mod http;
+pub mod jwt;
+pub mod loopback;
+pub mod oidc;
 pub mod store;
 
 /// Milliseconds since the Unix epoch, from the system clock.
