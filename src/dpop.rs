@@ -272,7 +272,7 @@ pub fn random_uuid_v4() -> Result<String, DpopError> {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    Some(format!(
+    Ok(format!(
         "{}-{}-{}-{}-{}",
         &hex[0..8],
         &hex[8..12],
@@ -280,7 +280,6 @@ pub fn random_uuid_v4() -> Result<String, DpopError> {
         &hex[16..20],
         &hex[20..32]
     ))
-    .ok_or_else(|| DpopError("could not format a proof identifier".to_string()))
 }
 
 fn json_string(value: &str) -> String {

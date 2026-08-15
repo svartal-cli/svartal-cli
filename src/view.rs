@@ -95,7 +95,7 @@ pub fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
             .iter()
             .enumerate()
             .map(|(column, cell)| {
-                if column == cells.len() - 1 {
+                if column + 1 == cells.len() {
                     cell.clone()
                 } else {
                     let width = widths.get(column).copied().unwrap_or_else(|| cell.chars().count());
