@@ -46,6 +46,20 @@ url = "2"
 # The `rand` generators are not needed: nothing here wants a PRNG, only the
 # kernel's.
 getrandom = "0.2"
+# The WebSocket the shell runs over: blocking client, rustls (the same rustls
+# and root store ureq already links, so TLS is one implementation in this
+# binary, not two). Hand-rolling RFC 6455 framing would have added zero crates
+# and about 350 lines of masking, fragmentation and close-handshake code to
+# audit; a reviewed implementation of a security-relevant wire format is worth
+# the eleven crates it brings (see README).
+tungstenite = { version = "0.30", default-features = false, features = [
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
+# termios (raw mode), TIOCGWINSZ (terminal size), sigaction (SIGWINCH) and
+# isatty. brok's choice; the alternative is a terminal crate that wraps these
+# four calls in a few hundred more.
+libc = "0.2"
 
 # Tests reach for the same crates the library already uses: the fixtures are
 # JSON, and proving a proof verifies means doing P-256 verification here.

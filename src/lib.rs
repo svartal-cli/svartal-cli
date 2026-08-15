@@ -23,8 +23,14 @@ pub mod jwt;
 pub mod loopback;
 pub mod oidc;
 pub mod relay;
+pub mod rpc;
+pub mod shell;
 pub mod store;
+pub mod target;
+pub mod terminal;
 pub mod view;
+pub mod workspace;
+pub mod ws;
 
 /// Milliseconds since the Unix epoch, from the system clock.
 ///

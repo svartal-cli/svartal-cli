@@ -183,6 +183,90 @@ pub fn machines(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Resul
     Ok(())
 }
 
+/// `svartal shell <machine-or-workspace>`.
+///
+/// Resolve, connect, then hand the terminal over. The remote shell is
+/// deliberately left running when the CLI exits: reattaching is the normal
+/// case, and the closing line says so rather than implying the shell was
+/// killed.
+pub fn shell(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    target: &str,
+    terminal_id: Option<&str>,
+) -> Result<(), CliError> {
+    let session = context.current_session()?;
+    let view = load_view(context)?;
+    let target = crate::target::select_shell_target(&view, target).map_err(CliError::of)?;
+
+    let dpop_key =
+        crate::dpop::load_or_create_key(&context.config.state_directory).map_err(CliError::of)?;
+    let connection = crate::shell::connect_workspace(
+        context.http,
+        &crate::shell::ConnectInput {
+            relay_url: &context.config.relay_url,
+            client_id: &context.config.client_id,
+            access_token: &session.access_token,
+            target: &target,
+            dpop_key: &dpop_key,
+            client_metadata: crate::shell::cli_client_metadata(),
+        },
+    )
+    .map_err(CliError::of)?;
+
+    let transport = crate::ws::WebSocketTransport::connect(&connection.socket_url).map_err(|error| {
+        CliError::of(crate::shell::ShellError::Connection {
+            label: target.label.clone(),
+            detail: error.to_string(),
+        })
+    })?;
+    let mut rpc = crate::rpc::RpcClient::new(transport);
+
+    let size = crate::terminal::terminal_size();
+    let shell_session = crate::shell::open_shell(
+        &mut rpc,
+        &crate::shell::OpenInput {
+            label: &target.label,
+            subject: &session.user.sub,
+            terminal_id,
+            environment_id: &target.environment_id,
+            size,
+        },
+    )
+    .map_err(CliError::of)?;
+
+    writeln!(
+        out,
+        "{}",
+        if shell_session.reattached {
+            format!("Back in your shell on {} ({}).", target.label, shell_session.cwd)
+        } else {
+            format!("Shell on {} ({}).", target.label, shell_session.cwd)
+        }
+    )
+    .ok();
+
+    // Raw mode from here, restored by the guard on every way out of this
+    // function: a normal end, an error, a panic, or a signal.
+    let raw = crate::terminal::RawMode::enter();
+    let mut local = crate::terminal::ProcessTerminal::new(raw.interactive());
+    let outcome = crate::shell::run_shell_pump(
+        &mut rpc,
+        &mut local,
+        &crate::shell::PumpInput {
+            session: &shell_session,
+            label: &target.label,
+            subject: &session.user.sub,
+        },
+    );
+    drop(raw);
+    rpc.transport_mut().close();
+
+    let outcome = outcome.map_err(CliError::of)?;
+    writeln!(out, "{}", crate::shell::describe_shell_outcome(&outcome, &target.label)).ok();
+    Ok(())
+}
+
 pub fn sessions(
     context: &Context<'_>,
     out: &mut dyn Write,

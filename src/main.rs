@@ -24,10 +24,12 @@ Commands:
   whoami             Show who this terminal is signed in as.
   machines           List the machines and workspaces you can reach.
   sessions [machine] List agent sessions on a machine.
+  shell <target>     Open a shell in a workspace you can reach.
 
 Options:
   --json             Emit JSON instead of a table (whoami, machines, sessions).
   --no-browser       Print the sign-in URL instead of opening a browser (login).
+  --terminal-id <id> Open a second, separate shell on the same workspace (shell).
   -h, --help         Show this message.
   -V, --version      Show the version.
 ";
@@ -63,13 +65,6 @@ fn run(arguments: &[String]) -> Result<(), String> {
             writeln!(stdout, "svartal v{}", env!("CARGO_PKG_VERSION")).ok();
             return Ok(());
         }
-        "shell" => {
-            // Honest rather than silent: the shell is phase 2 of this port.
-            return Err(
-                "`shell` is not in this build yet. It is the next thing being ported; the npm `@svartal/cli` has it today."
-                    .to_string(),
-            );
-        }
         _ => {}
     }
 
@@ -77,19 +72,36 @@ fn run(arguments: &[String]) -> Result<(), String> {
     // misunderstanding worth saying out loud, not something to ignore.
     let accepted: &[&str] = match command {
         "login" => &["--no-browser"],
+        "shell" => &["--terminal-id"],
         "whoami" | "machines" | "sessions" => &["--json"],
         _ => &[],
     };
-    let rest = &arguments[1..];
-    if let Some(unknown) =
-        rest.iter().find(|argument| argument.starts_with('-') && !accepted.contains(&argument.as_str()))
-    {
-        return Err(format!("{unknown} is not an option `svartal {command}` takes."));
+    let mut json = false;
+    let mut no_browser = false;
+    let mut terminal_id: Option<String> = None;
+    let mut positional: Vec<&str> = Vec::new();
+    let mut rest = arguments[1..].iter();
+    while let Some(argument) = rest.next() {
+        if !argument.starts_with('-') {
+            positional.push(argument);
+            continue;
+        }
+        if !accepted.contains(&argument.as_str()) {
+            return Err(format!("{argument} is not an option `svartal {command}` takes."));
+        }
+        match argument.as_str() {
+            "--json" => json = true,
+            "--no-browser" => no_browser = true,
+            "--terminal-id" => {
+                terminal_id = Some(
+                    rest.next()
+                        .ok_or_else(|| "--terminal-id needs a value.".to_string())?
+                        .clone(),
+                );
+            }
+            _ => {}
+        }
     }
-    let json = rest.iter().any(|argument| argument == "--json");
-    let no_browser = rest.iter().any(|argument| argument == "--no-browser");
-    let positional: Vec<&str> =
-        rest.iter().filter(|argument| !argument.starts_with('-')).map(String::as_str).collect();
 
     let environment = environment_from_process();
     let config = resolve_config(&environment).map_err(|error| error.to_string())?;
@@ -108,6 +120,14 @@ fn run(arguments: &[String]) -> Result<(), String> {
         "whoami" => commands::whoami(&context, &mut stdout, json),
         "machines" => commands::machines(&context, &mut stdout, json),
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
+        "shell" => {
+            let Some(target) = positional.first().copied() else {
+                return Err(
+                    "`svartal shell` needs a machine or workspace to connect to. Run `svartal machines` to see them.".to_string(),
+                );
+            };
+            commands::shell(&context, &mut stdout, target, terminal_id.as_deref())
+        }
         other => {
             return Err(format!(
                 "`{other}` is not a svartal command. Run `svartal --help` to see what is."

@@ -33,6 +33,11 @@ impl FakeTransport {
         Self { router: Box::new(router), requests: RefCell::new(Vec::new()) }
     }
 
+    /// Every request, in order.
+    pub fn requests(&self) -> Vec<Request> {
+        self.requests.borrow().clone()
+    }
+
     pub fn urls(&self) -> Vec<String> {
         self.requests.borrow().iter().map(|request| request.url.clone()).collect()
     }

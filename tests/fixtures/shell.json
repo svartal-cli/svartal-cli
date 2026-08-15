@@ -1,0 +1,371 @@
+{
+  "relayUrl": "https://relay.example.com",
+  "httpBaseUrl": "https://workspace.example.com",
+  "wsBaseUrl": "wss://workspace.example.com",
+  "environmentId": "env-fixture-0001",
+  "subject": "11111111-2222-3333-4444-555555555555",
+  "privateJwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "gIM9Zyiqs6b9rsCD1rnUWlY4KdbMG0_ZoiN-o3R5-dE",
+    "y": "mXO03LW1mqi7gU76vC6EYr7p4SsPHAPY1eiQPt0IiSc",
+    "d": "E5fWojxBXygO15oCGp0gdiy1vZ71-cPnMnL-4Ttv6GI"
+  },
+  "target": {
+    "environmentId": "env-fixture-0001",
+    "label": "Primary",
+    "machineName": "workbench",
+    "linked": true,
+    "machinePresence": "unknown"
+  },
+  "size": {
+    "cols": 120,
+    "rows": 40
+  },
+  "terminalId": "shell-env-fixture-0001",
+  "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
+  "workspaceCwd": "/home/person/workspace",
+  "socketUrl": "wss://workspace.example.com/ws?wsTicket=ws-ticket-fixture",
+  "httpCalls": [
+    {
+      "url": "https://relay.example.com/v1/client/dpop-token",
+      "method": "POST",
+      "authorization": null,
+      "hasDpopProof": true,
+      "dpopClaims": {
+        "htm": "POST",
+        "htu": "https://relay.example.com/v1/client/dpop-token",
+        "jti": "003f19ce-a308-47c3-8b9f-5cd3f2a83368",
+        "iat": 1786812761
+      },
+      "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=oidc-access-token&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2F%2Frelay.example.com&scope=environment%3Aconnect&client_id=svartal-cli"
+    },
+    {
+      "url": "https://relay.example.com/v1/environments/env-fixture-0001/connect",
+      "method": "POST",
+      "authorization": "DPoP relay-access-token",
+      "hasDpopProof": true,
+      "dpopClaims": {
+        "htm": "POST",
+        "htu": "https://relay.example.com/v1/environments/env-fixture-0001/connect",
+        "jti": "e1d267a5-a734-4327-9fbf-f912b4106db0",
+        "iat": 1786812761,
+        "ath": "-M3NHAaxswmcT56jeetLC28qdSxzQTiIKIPCCf03fkE"
+      },
+      "body": "{\"clientProofKeyThumbprint\":\"qE8IIskYdgrNmuk-iarrpPvJhIZ-jCOUBsJisLa6Yc0\"}"
+    },
+    {
+      "url": "https://workspace.example.com/oauth/token",
+      "method": "POST",
+      "authorization": null,
+      "hasDpopProof": true,
+      "dpopClaims": {
+        "htm": "POST",
+        "htu": "https://workspace.example.com/oauth/token",
+        "jti": "26dc8e5f-8bf2-4b92-b3c6-f36e0bade4a5",
+        "iat": 1786812761
+      },
+      "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=environment-credential&subject_token_type=urn%3At3%3Aparams%3Aoauth%3Atoken-type%3Aenvironment-bootstrap&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&scope=terminal%3Aoperate+orchestration%3Aread&client_label=svartal+CLI&client_device_type=desktop"
+    },
+    {
+      "url": "https://workspace.example.com/api/auth/websocket-ticket",
+      "method": "POST",
+      "authorization": "DPoP workspace-access-token",
+      "hasDpopProof": true,
+      "dpopClaims": {
+        "htm": "POST",
+        "htu": "https://workspace.example.com/api/auth/websocket-ticket",
+        "jti": "a36507de-3179-4ccc-9a56-fc0bca4b888c",
+        "iat": 1786812761,
+        "ath": "3mjY2PMoTuPQLl3VB1HXx7l6gT9NJLvpNDq-1ErvuUw"
+      },
+      "body": ""
+    }
+  ],
+  "clientFrames": [
+    {
+      "_tag": "Request",
+      "id": "0",
+      "tag": "server.getConfig",
+      "payload": {},
+      "traceId": "5cd8e8670d2e9b9e08c0ec9e12ecd325",
+      "spanId": "26f3f038a54d92cc",
+      "sampled": true,
+      "headers": []
+    },
+    {
+      "_tag": "Request",
+      "id": "1",
+      "tag": "terminal.open",
+      "payload": {
+        "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
+        "terminalId": "shell-env-fixture-0001",
+        "cwd": "/home/person/workspace",
+        "cols": 120,
+        "rows": 40
+      },
+      "traceId": "5cd8e8670d2e9b9e08c0ec9e12ecd325",
+      "spanId": "e63fa744e21b30bb",
+      "sampled": true,
+      "headers": []
+    },
+    {
+      "_tag": "Request",
+      "id": "2",
+      "tag": "terminal.attach",
+      "payload": {
+        "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
+        "terminalId": "shell-env-fixture-0001",
+        "cols": 120,
+        "rows": 40
+      },
+      "traceId": "f0c3ab7397f1790f980bf2f79d1f5c82",
+      "spanId": "9296c3f0bc496388",
+      "sampled": true,
+      "headers": []
+    },
+    {
+      "_tag": "Ack",
+      "requestId": "2"
+    },
+    {
+      "_tag": "Ack",
+      "requestId": "2"
+    },
+    {
+      "_tag": "Request",
+      "id": "3",
+      "tag": "terminal.write",
+      "payload": {
+        "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
+        "terminalId": "shell-env-fixture-0001",
+        "data": "echo hello\r"
+      },
+      "traceId": "f0c3ab7397f1790f980bf2f79d1f5c82",
+      "spanId": "8d101746da648d46",
+      "sampled": true,
+      "headers": []
+    },
+    {
+      "_tag": "Request",
+      "id": "4",
+      "tag": "terminal.resize",
+      "payload": {
+        "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
+        "terminalId": "shell-env-fixture-0001",
+        "cols": 100,
+        "rows": 30
+      },
+      "traceId": "f0c3ab7397f1790f980bf2f79d1f5c82",
+      "spanId": "8d862018e7c1ea1c",
+      "sampled": true,
+      "headers": []
+    },
+    {
+      "_tag": "Ack",
+      "requestId": "2"
+    },
+    {
+      "_tag": "Interrupt",
+      "requestId": "2"
+    }
+  ],
+  "serverFrames": [
+    {
+      "_tag": "Exit",
+      "requestId": "0",
+      "exit": {
+        "_tag": "Success",
+        "value": {
+          "environment": {
+            "environmentId": "env-fixture-0001",
+            "label": "Primary",
+            "platform": {
+              "os": "linux",
+              "arch": "arm64"
+            },
+            "serverVersion": "0.0.0-fixture",
+            "capabilities": {
+              "repositoryIdentity": true,
+              "connectionProbe": true
+            }
+          },
+          "auth": {
+            "policy": "loopback-browser",
+            "bootstrapMethods": [
+              "one-time-token"
+            ],
+            "sessionMethods": [
+              "dpop-access-token"
+            ],
+            "sessionCookieName": "t3_session"
+          },
+          "cwd": "/home/person/workspace",
+          "keybindingsConfigPath": "/home/person/workspace/keybindings.json",
+          "keybindings": [],
+          "issues": [],
+          "providers": [],
+          "availableEditors": [],
+          "observability": {
+            "logsDirectoryPath": "/tmp/logs",
+            "localTracingEnabled": false,
+            "otlpTracesEnabled": false,
+            "otlpMetricsEnabled": false
+          },
+          "settings": {
+            "enableAssistantStreaming": true,
+            "enableProviderUpdateChecks": true,
+            "automaticGitFetchInterval": 30000,
+            "defaultThreadEnvMode": "local",
+            "newWorktreesStartFromOrigin": false,
+            "knitConversationAttribution": true,
+            "commitSignature": true,
+            "orchestrator": {
+              "enabled": false,
+              "taskTypes": [],
+              "models": [],
+              "rules": [],
+              "repoRules": [],
+              "defaults": {}
+            },
+            "addProjectBaseDirectory": "",
+            "textGenerationModelSelection": {
+              "instanceId": "codex",
+              "model": "gpt-5.4-mini"
+            },
+            "providers": {
+              "codex": {
+                "enabled": true,
+                "binaryPath": "codex",
+                "homePath": "",
+                "shadowHomePath": "",
+                "customModels": []
+              },
+              "claudeAgent": {
+                "enabled": true,
+                "binaryPath": "claude",
+                "homePath": "",
+                "customModels": [],
+                "launchArgs": ""
+              },
+              "cursor": {
+                "enabled": false,
+                "binaryPath": "cursor-agent",
+                "apiEndpoint": "",
+                "customModels": []
+              },
+              "grok": {
+                "enabled": true,
+                "binaryPath": "grok",
+                "customModels": []
+              },
+              "opencode": {
+                "enabled": true,
+                "binaryPath": "opencode",
+                "serverUrl": "",
+                "serverPassword": "",
+                "customModels": []
+              }
+            },
+            "providerInstances": {},
+            "observability": {
+              "otlpTracesUrl": "",
+              "otlpMetricsUrl": ""
+            }
+          }
+        }
+      }
+    },
+    {
+      "_tag": "Exit",
+      "requestId": "1",
+      "exit": {
+        "_tag": "Success",
+        "value": {
+          "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
+          "terminalId": "shell-env-fixture-0001",
+          "cwd": "/home/person/workspace",
+          "worktreePath": null,
+          "status": "starting",
+          "pid": null,
+          "history": "",
+          "exitCode": null,
+          "exitSignal": null,
+          "label": "shell",
+          "updatedAt": "2026-07-30T12:00:00.000Z"
+        }
+      }
+    },
+    {
+      "_tag": "Chunk",
+      "requestId": "2",
+      "values": [
+        {
+          "type": "snapshot",
+          "snapshot": {
+            "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
+            "terminalId": "shell-env-fixture-0001",
+            "cwd": "/home/person/workspace",
+            "worktreePath": null,
+            "status": "starting",
+            "pid": null,
+            "history": "previous output\r\n",
+            "exitCode": null,
+            "exitSignal": null,
+            "label": "shell",
+            "updatedAt": "2026-07-30T12:00:00.000Z"
+          }
+        }
+      ]
+    },
+    {
+      "_tag": "Chunk",
+      "requestId": "2",
+      "values": [
+        {
+          "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
+          "terminalId": "shell-env-fixture-0001",
+          "type": "output",
+          "data": "hello\r\n"
+        }
+      ]
+    },
+    {
+      "_tag": "Exit",
+      "requestId": "3",
+      "exit": {
+        "_tag": "Success",
+        "value": null
+      }
+    },
+    {
+      "_tag": "Exit",
+      "requestId": "4",
+      "exit": {
+        "_tag": "Success",
+        "value": null
+      }
+    },
+    {
+      "_tag": "Chunk",
+      "requestId": "2",
+      "values": [
+        {
+          "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
+          "terminalId": "shell-env-fixture-0001",
+          "type": "exited",
+          "exitCode": 0,
+          "exitSignal": null
+        }
+      ]
+    }
+  ],
+  "terminalWrites": [
+    "previous output\r\n",
+    "hello\r\n"
+  ],
+  "outcome": {
+    "_tag": "exited",
+    "exitCode": 0
+  }
+}
