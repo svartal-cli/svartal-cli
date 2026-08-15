@@ -48,12 +48,19 @@ fn run(arguments: &[String]) -> Result<(), String> {
     let mut stdout = std::io::stdout();
     let command = arguments.first().map(String::as_str).unwrap_or_default();
     match command {
-        "" | "-h" | "--help" | "help" => {
+        "-h" | "--help" | "help" => {
             write!(stdout, "{USAGE}").ok();
             return Ok(());
         }
+        "" => {
+            // The npm CLI prints its help and exits 1 when it is given no
+            // command; a shell script that runs `svartal` with an empty
+            // argument should not read as success in either of them.
+            write!(stdout, "{USAGE}").ok();
+            return Err("no command given.".to_string());
+        }
         "-V" | "--version" => {
-            writeln!(stdout, "svartal {}", env!("CARGO_PKG_VERSION")).ok();
+            writeln!(stdout, "svartal v{}", env!("CARGO_PKG_VERSION")).ok();
             return Ok(());
         }
         "shell" => {
