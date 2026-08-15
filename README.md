@@ -1,6 +1,6 @@
-# svartal
+# svartal-cli
 
-The Svartal terminal CLI, in Rust.
+The Svartal terminal CLI, in Rust. The repository and crate are `svartal-cli`; the installed command is `svartal`. The bare `svartal` name belongs to the platform, not to any one program.
 
 `svartal` signs you in to Svartal from a terminal, tells you who you are, and
 lists the machines and workspaces you can reach. It exists so the program that
