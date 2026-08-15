@@ -1,0 +1,96 @@
+{
+  "privateJwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "gIM9Zyiqs6b9rsCD1rnUWlY4KdbMG0_ZoiN-o3R5-dE",
+    "y": "mXO03LW1mqi7gU76vC6EYr7p4SsPHAPY1eiQPt0IiSc",
+    "d": "E5fWojxBXygO15oCGp0gdiy1vZ71-cPnMnL-4Ttv6GI"
+  },
+  "publicJwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "gIM9Zyiqs6b9rsCD1rnUWlY4KdbMG0_ZoiN-o3R5-dE",
+    "y": "mXO03LW1mqi7gU76vC6EYr7p4SsPHAPY1eiQPt0IiSc"
+  },
+  "thumbprint": "qE8IIskYdgrNmuk-iarrpPvJhIZ-jCOUBsJisLa6Yc0",
+  "accessToken": "fixture-relay-access-token",
+  "cases": [
+    {
+      "name": "token-exchange",
+      "method": "POST",
+      "url": "https://relay.example.com/v1/client/dpop-token",
+      "jti": "7c1f0a2e-0000-4000-8000-000000001111",
+      "iat": 1785412800,
+      "signingInput": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwiY3J2IjoiUC0yNTYiLCJ4IjoiZ0lNOVp5aXFzNmI5cnNDRDFyblVXbFk0S2RiTUcwX1pvaU4tbzNSNS1kRSIsInkiOiJtWE8wM0xXMW1xaTdnVTc2dkM2RVlyN3A0U3NQSEFQWTFlaVFQdDBJaVNjIn19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9yZWxheS5leGFtcGxlLmNvbS92MS9jbGllbnQvZHBvcC10b2tlbiIsImp0aSI6IjdjMWYwYTJlLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMTExMSIsImlhdCI6MTc4NTQxMjgwMH0",
+      "header": {
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "gIM9Zyiqs6b9rsCD1rnUWlY4KdbMG0_ZoiN-o3R5-dE",
+          "y": "mXO03LW1mqi7gU76vC6EYr7p4SsPHAPY1eiQPt0IiSc"
+        }
+      },
+      "payload": {
+        "htm": "POST",
+        "htu": "https://relay.example.com/v1/client/dpop-token",
+        "jti": "7c1f0a2e-0000-4000-8000-000000001111",
+        "iat": 1785412800
+      },
+      "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwiY3J2IjoiUC0yNTYiLCJ4IjoiZ0lNOVp5aXFzNmI5cnNDRDFyblVXbFk0S2RiTUcwX1pvaU4tbzNSNS1kRSIsInkiOiJtWE8wM0xXMW1xaTdnVTc2dkM2RVlyN3A0U3NQSEFQWTFlaVFQdDBJaVNjIn19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9yZWxheS5leGFtcGxlLmNvbS92MS9jbGllbnQvZHBvcC10b2tlbiIsImp0aSI6IjdjMWYwYTJlLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMTExMSIsImlhdCI6MTc4NTQxMjgwMH0.LUZ5UQEyMtkIo6T6YxlkS35TaHxy-dl1dWQuB94ryhFCGh2GJonpge6r8CnFC3EkPZgDlWT9cSxGLMLcIeqteA"
+    },
+    {
+      "name": "connect-with-ath",
+      "method": "POST",
+      "url": "https://relay.example.com/v1/environments/env-fixture-0001/connect",
+      "accessToken": "fixture-relay-access-token",
+      "jti": "7c1f0a2e-0000-4000-8000-000000002222",
+      "iat": 1785412801,
+      "signingInput": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwiY3J2IjoiUC0yNTYiLCJ4IjoiZ0lNOVp5aXFzNmI5cnNDRDFyblVXbFk0S2RiTUcwX1pvaU4tbzNSNS1kRSIsInkiOiJtWE8wM0xXMW1xaTdnVTc2dkM2RVlyN3A0U3NQSEFQWTFlaVFQdDBJaVNjIn19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9yZWxheS5leGFtcGxlLmNvbS92MS9lbnZpcm9ubWVudHMvZW52LWZpeHR1cmUtMDAwMS9jb25uZWN0IiwianRpIjoiN2MxZjBhMmUtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAyMjIyIiwiaWF0IjoxNzg1NDEyODAxLCJhdGgiOiJ4V081Q1Z4TTF3dm11aEVPcWphVjFVbHNnTmYwc042SGlDXzJFYU44amtjIn0",
+      "header": {
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "gIM9Zyiqs6b9rsCD1rnUWlY4KdbMG0_ZoiN-o3R5-dE",
+          "y": "mXO03LW1mqi7gU76vC6EYr7p4SsPHAPY1eiQPt0IiSc"
+        }
+      },
+      "payload": {
+        "htm": "POST",
+        "htu": "https://relay.example.com/v1/environments/env-fixture-0001/connect",
+        "jti": "7c1f0a2e-0000-4000-8000-000000002222",
+        "iat": 1785412801,
+        "ath": "xWO5CVxM1wvmuhEOqjaV1UlsgNf0sN6HiC_2EaN8jkc"
+      },
+      "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwiY3J2IjoiUC0yNTYiLCJ4IjoiZ0lNOVp5aXFzNmI5cnNDRDFyblVXbFk0S2RiTUcwX1pvaU4tbzNSNS1kRSIsInkiOiJtWE8wM0xXMW1xaTdnVTc2dkM2RVlyN3A0U3NQSEFQWTFlaVFQdDBJaVNjIn19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9yZWxheS5leGFtcGxlLmNvbS92MS9lbnZpcm9ubWVudHMvZW52LWZpeHR1cmUtMDAwMS9jb25uZWN0IiwianRpIjoiN2MxZjBhMmUtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAyMjIyIiwiaWF0IjoxNzg1NDEyODAxLCJhdGgiOiJ4V081Q1Z4TTF3dm11aEVPcWphVjFVbHNnTmYwc042SGlDXzJFYU44amtjIn0.vHl-Ok8N6kgbMK1kE72jfhinX9Wagl9pEYwYxmguclFjHEGOOl0iAJRALLfoB-DAFEJoZxGEFnPMRBHT56jYJw"
+    },
+    {
+      "name": "query-and-fragment-stripped",
+      "method": "get",
+      "url": "https://relay.example.com/v1/environments?cursor=2#anchor",
+      "jti": "7c1f0a2e-0000-4000-8000-000000003333",
+      "iat": 1785412802,
+      "signingInput": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwiY3J2IjoiUC0yNTYiLCJ4IjoiZ0lNOVp5aXFzNmI5cnNDRDFyblVXbFk0S2RiTUcwX1pvaU4tbzNSNS1kRSIsInkiOiJtWE8wM0xXMW1xaTdnVTc2dkM2RVlyN3A0U3NQSEFQWTFlaVFQdDBJaVNjIn19.eyJodG0iOiJHRVQiLCJodHUiOiJodHRwczovL3JlbGF5LmV4YW1wbGUuY29tL3YxL2Vudmlyb25tZW50cyIsImp0aSI6IjdjMWYwYTJlLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMzMzMyIsImlhdCI6MTc4NTQxMjgwMn0",
+      "header": {
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "gIM9Zyiqs6b9rsCD1rnUWlY4KdbMG0_ZoiN-o3R5-dE",
+          "y": "mXO03LW1mqi7gU76vC6EYr7p4SsPHAPY1eiQPt0IiSc"
+        }
+      },
+      "payload": {
+        "htm": "GET",
+        "htu": "https://relay.example.com/v1/environments",
+        "jti": "7c1f0a2e-0000-4000-8000-000000003333",
+        "iat": 1785412802
+      },
+      "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwiY3J2IjoiUC0yNTYiLCJ4IjoiZ0lNOVp5aXFzNmI5cnNDRDFyblVXbFk0S2RiTUcwX1pvaU4tbzNSNS1kRSIsInkiOiJtWE8wM0xXMW1xaTdnVTc2dkM2RVlyN3A0U3NQSEFQWTFlaVFQdDBJaVNjIn19.eyJodG0iOiJHRVQiLCJodHUiOiJodHRwczovL3JlbGF5LmV4YW1wbGUuY29tL3YxL2Vudmlyb25tZW50cyIsImp0aSI6IjdjMWYwYTJlLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMzMzMyIsImlhdCI6MTc4NTQxMjgwMn0.XBcPcIJNLiHH0NjhTpYG9IpQ6YS-6EVcDOF79zVRN6duoVH850VDST_qoKZTnpTD7tJP3zgXY3hcLv_hKUbvgw"
+    }
+  ]
+}

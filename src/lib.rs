@@ -14,6 +14,7 @@
 
 pub mod browser;
 pub mod config;
+pub mod dpop;
 pub mod fsutil;
 pub mod http;
 pub mod jwt;
