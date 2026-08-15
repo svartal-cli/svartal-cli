@@ -62,7 +62,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
             return Err("no command given.".to_string());
         }
         "-V" | "--version" => {
-            writeln!(stdout, "svartal v{}", env!("CARGO_PKG_VERSION")).ok();
+            writeln!(stdout, "sv v{}", env!("CARGO_PKG_VERSION")).ok();
             return Ok(());
         }
         _ => {}
