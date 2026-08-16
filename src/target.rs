@@ -7,7 +7,14 @@
 //!
 //! The input is the same joined view `sv machines` prints, so the CLI
 //! never resolves against data the person could not have seen.
+//!
+//! A short name recorded with `sv name` is the fourth thing an argument can
+//! be, and it sits in the middle of the order on purpose: below workspace ids,
+//! which are unique and cannot be argued with, and above labels and machine
+//! names, which the person did not choose and which the workspace can rename
+//! underneath them.
 
+use crate::shortnames::Shortnames;
 use crate::view::{MachinesView, WorkspaceRow, render_table};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,11 +116,23 @@ pub enum Resolution {
 
 /// Resolve one argument against the view.
 ///
+/// The order is workspace id, then short name, then label or machine name.
+///
 /// A workspace id wins outright, because ids are unique and a person who typed
-/// one has already been specific. Everything else is matched on equal footing:
-/// if a machine name and a workspace label both answer to the same word, that
-/// is genuinely ambiguous and the person has to say which.
-pub fn resolve_shell_target(view: &MachinesView, argument: &str) -> Resolution {
+/// one has already been specific. A short name comes next: the person typed it
+/// into `sv name` themselves, so it is the one word here they chose. Labels and
+/// machine names are matched last and on equal footing: if a machine name and a
+/// workspace label both answer to the same word, that is genuinely ambiguous
+/// and the person has to say which.
+///
+/// A short name pointing at a workspace that is no longer in the view falls
+/// through to the ordinary matching rather than failing on its own, so a stale
+/// entry reads as "no workspace called web" with the usual list under it.
+pub fn resolve_shell_target(
+    view: &MachinesView,
+    shortnames: &Shortnames,
+    argument: &str,
+) -> Resolution {
     let needle = normalize(argument);
     let candidates = shell_targets(view);
     let reachable = |candidates: &[ShellTarget]| -> Vec<ShellTarget> {
@@ -129,6 +148,15 @@ pub fn resolve_shell_target(view: &MachinesView, argument: &str) -> Resolution {
         .collect();
     if by_id.len() == 1 {
         return Resolution::Resolved(by_id[0].clone());
+    }
+
+    if let Some(environment_id) = shortnames.environment_of(&needle) {
+        let named = normalize(environment_id);
+        if let Some(target) =
+            candidates.iter().find(|target| normalize(&target.environment_id) == named)
+        {
+            return Resolution::Resolved(target.clone());
+        }
     }
 
     let matches: Vec<ShellTarget> = candidates
@@ -171,16 +199,18 @@ pub fn format_target_candidates(candidates: &[ShellTarget]) -> String {
 /// every other refusal prints.
 pub fn select_target(
     view: &MachinesView,
+    shortnames: &Shortnames,
     argument: Option<&str>,
 ) -> Result<ShellTarget, TargetError> {
     match argument.map(str::trim).filter(|argument| !argument.is_empty()) {
-        Some(argument) => select_shell_target(view, argument),
+        Some(argument) => select_shell_target(view, shortnames, argument),
         None => {
             let reachable: Vec<ShellTarget> =
                 shell_targets(view).into_iter().filter(|target| target.linked).collect();
             match reachable.len() {
                 1 => select_shell_target(
                     view,
+                    shortnames,
                     &reachable.into_iter().next().expect("one target").environment_id,
                 ),
                 _ => Err(TargetError::Unspecified {
@@ -200,8 +230,12 @@ pub fn select_target(
 /// A machine whose heartbeat says `offline` is refused; `unknown` is not. Most
 /// machines never report at all, so treating silence as "offline" would refuse
 /// almost every real connection.
-pub fn select_shell_target(view: &MachinesView, argument: &str) -> Result<ShellTarget, TargetError> {
-    let target = match resolve_shell_target(view, argument) {
+pub fn select_shell_target(
+    view: &MachinesView,
+    shortnames: &Shortnames,
+    argument: &str,
+) -> Result<ShellTarget, TargetError> {
+    let target = match resolve_shell_target(view, shortnames, argument) {
         Resolution::Ambiguous(candidates) => {
             return Err(TargetError::Ambiguous {
                 argument: argument.to_string(),

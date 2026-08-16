@@ -82,3 +82,40 @@ impl HttpTransport for FakeTransport {
 pub fn form_value(fields: &[(String, String)], name: &str) -> Option<String> {
     fields.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone())
 }
+
+/// A throwaway state directory, removed when the test ends.
+///
+/// Hand-rolled rather than a crate: the tests need one directory with a name
+/// nothing else will pick, and that is a process id, a clock reading and a
+/// counter. A test must never write into the real `~/.config/svartal`.
+pub struct TempDir {
+    path: std::path::PathBuf,
+}
+
+impl TempDir {
+    pub fn new(tag: &str) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "svartal-cli-test-{tag}-{}-{nanos}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("temporary directory");
+        Self { path }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}

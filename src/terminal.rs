@@ -65,13 +65,45 @@ pub fn terminal_size() -> TerminalSize {
 // -- raw mode --------------------------------------------------------------
 
 static RAW_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
 static mut SAVED_TERMIOS: Option<libc::termios> = None;
 
-/// Restore the terminal if this process put it in raw mode.
+const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+
+/// Write straight to the descriptor, without going through a buffered writer.
+///
+/// `write` is on POSIX's async-signal-safe list; `std::io::Stdout` and its lock
+/// are not, and the cursor has to come back even when the restore runs from a
+/// signal handler.
+fn write_stdout_raw(bytes: &[u8]) {
+    // SAFETY: writing bytes we own to a descriptor this process holds.
+    unsafe {
+        libc::write(libc::STDOUT_FILENO, bytes.as_ptr().cast(), bytes.len());
+    }
+}
+
+/// Hide the cursor, and remember that it has to come back.
+pub fn hide_cursor() {
+    if !CURSOR_HIDDEN.swap(true, Ordering::SeqCst) {
+        write_stdout_raw(HIDE_CURSOR);
+    }
+}
+
+/// Show the cursor, if this process hid it.
+pub fn show_cursor() {
+    if CURSOR_HIDDEN.swap(false, Ordering::SeqCst) {
+        write_stdout_raw(SHOW_CURSOR);
+    }
+}
+
+/// Restore whatever this process changed about the terminal: the cursor first,
+/// then raw mode.
 ///
 /// `tcsetattr` is on POSIX's async-signal-safe list, which is what makes this
 /// callable from a signal handler.
 fn restore_terminal() {
+    show_cursor();
     if !RAW_ACTIVE.swap(false, Ordering::SeqCst) {
         return;
     }
@@ -206,6 +238,32 @@ pub fn spawn_input_reader() -> Receiver<Input> {
         }
     });
     receiver
+}
+
+/// One blocking read of local input, on the calling thread. `None` is end of
+/// input.
+///
+/// The picker uses this instead of the reader thread above: it runs before the
+/// shell, and the shell starts a reader of its own. Two threads reading one
+/// stdin would split the person's keystrokes between them at random.
+pub fn read_stdin(buffer: &mut [u8]) -> Option<usize> {
+    loop {
+        // SAFETY: reading into a buffer the caller owns, on this process's
+        // stdin.
+        let read =
+            unsafe { libc::read(libc::STDIN_FILENO, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if read > 0 {
+            return Some(read as usize);
+        }
+        if read < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            // A signal arrived, not the person: read again. A window resize
+            // during the picker therefore repaints on the next keystroke
+            // rather than immediately, which is what a list this short can
+            // afford.
+            continue;
+        }
+        return None;
+    }
 }
 
 /// Holds back a trailing partial UTF-8 sequence, the way Node's

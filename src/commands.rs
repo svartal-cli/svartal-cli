@@ -17,7 +17,9 @@ use crate::http::HttpTransport;
 use crate::loopback::{CALLBACK_TIMEOUT, LoopbackError, LoopbackServer};
 use crate::oidc::{OidcClient, OidcConfig, Session};
 use crate::shell::TerminalKind;
+use crate::shortnames::{self, Shortnames};
 use crate::store::TokenStorage;
+use crate::target::ShellTarget;
 use crate::view;
 
 #[derive(Debug)]
@@ -160,6 +162,17 @@ pub fn whoami(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Result<
 }
 
 fn load_view(context: &Context<'_>) -> Result<view::MachinesView, CliError> {
+    Ok(load_session_and_view(context)?.1)
+}
+
+/// The session and the joined listing, fetched once.
+///
+/// `shell` needs both, and asking the provider twice for the same session (or
+/// the API twice for the same listing) inside one command would be two round
+/// trips paid for nothing.
+fn load_session_and_view(
+    context: &Context<'_>,
+) -> Result<(Session, view::MachinesView), CliError> {
     let session = context.current_session()?;
     let machines: Vec<Machine> =
         api::list_machines(context.http, &context.config.api_base_url, &session.access_token)
@@ -167,7 +180,16 @@ fn load_view(context: &Context<'_>) -> Result<view::MachinesView, CliError> {
     let links: Vec<LinkRecord> =
         api::list_linked_environments(context.http, &context.config.relay_url, &session.access_token)
             .map_err(CliError::of)?;
-    Ok(view::build_machines_view(&machines, &links))
+    Ok((session, view::build_machines_view(&machines, &links)))
+}
+
+/// The stored short names, or none.
+///
+/// Read paths never fail over this file: a name that cannot be read costs the
+/// person a shorthand, and refusing to open a shell because of it would cost
+/// them the shell. `sv name`, which writes, reports the error instead.
+fn stored_shortnames(context: &Context<'_>) -> Shortnames {
+    shortnames::read_shortnames(&context.config.state_directory).unwrap_or_default()
 }
 
 pub fn machines(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Result<(), CliError> {
@@ -184,6 +206,130 @@ pub fn machines(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Resul
     Ok(())
 }
 
+/// `sv envs`.
+///
+/// The same two listings `sv machines` joins, with the workspace as the subject
+/// and the short name in front of it. `sv machines` is unchanged: it is the
+/// command the npm CLI also has, and the two are meant to print the same thing.
+pub fn envs(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Result<(), CliError> {
+    let view = load_view(context)?;
+    let rows = view::build_env_rows(&view, &stored_shortnames(context));
+    if json {
+        writeln!(out, "{}", view::format_envs_json(&rows)).ok();
+        return Ok(());
+    }
+    writeln!(out, "{}", view::format_envs_view(&rows)).ok();
+    if !rows.is_empty() {
+        writeln!(out).ok();
+        writeln!(out, "{}", view::MACHINE_STATE_NOTE).ok();
+    }
+    Ok(())
+}
+
+/// `sv name` — the assignments, without asking the network for anything.
+pub fn list_names(context: &Context<'_>, out: &mut dyn Write) -> Result<(), CliError> {
+    let stored =
+        shortnames::read_shortnames(&context.config.state_directory).map_err(CliError::of)?;
+    if stored.is_empty() {
+        writeln!(out, "No workspace names yet. Name one with `sv name <name> <workspace>`.").ok();
+        return Ok(());
+    }
+    let table = view::render_table(
+        &["SHORTNAME", "WORKSPACE ID"],
+        &stored
+            .entries()
+            .map(|(name, environment_id)| vec![name.to_string(), environment_id.to_string()])
+            .collect::<Vec<_>>(),
+    );
+    writeln!(out, "{table}").ok();
+    Ok(())
+}
+
+/// `sv name <shortname> <workspace>`.
+///
+/// The workspace is resolved by the ordinary rules, so the thing being named
+/// can itself be a machine name, a label, a workspace id, or an older short
+/// name. A workspace that is not linked can still be named: naming is a note to
+/// yourself, not a connection.
+pub fn name(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    shortname: &str,
+    target: &str,
+) -> Result<(), CliError> {
+    let shortname = shortname.trim().to_lowercase();
+    if !shortnames::is_valid_shortname(&shortname) {
+        return Err(CliError(format!(
+            "{shortname} is not a usable name. {}",
+            shortnames::SHORTNAME_RULE
+        )));
+    }
+    let view = load_view(context)?;
+    let mut stored =
+        shortnames::read_shortnames(&context.config.state_directory).map_err(CliError::of)?;
+
+    // A name that is already a workspace id could never be resolved: ids win.
+    // Storing it would leave a name that silently does nothing.
+    if crate::target::shell_targets(&view)
+        .iter()
+        .any(|candidate| candidate.environment_id.to_lowercase() == shortname)
+    {
+        return Err(CliError(format!(
+            "{shortname} is already a workspace id, so a name like that would never be used. Pick another word."
+        )));
+    }
+
+    let resolved = match crate::target::resolve_shell_target(&view, &stored, target) {
+        crate::target::Resolution::Resolved(target) => target,
+        crate::target::Resolution::Ambiguous(candidates) => {
+            return Err(CliError::of(crate::target::TargetError::Ambiguous {
+                argument: target.to_string(),
+                candidates: crate::target::format_target_candidates(&candidates),
+            }));
+        }
+        crate::target::Resolution::Missing(_) => {
+            return Err(CliError(format!(
+                "No workspace called {target}. Run `sv envs` to see them:\n\n{}",
+                view::format_envs_view(&view::build_env_rows(&view, &stored))
+            )));
+        }
+    };
+
+    let assignment =
+        stored.assign(&shortname, &resolved.environment_id).map_err(CliError::of)?;
+    shortnames::write_shortnames(&context.config.state_directory, &stored)
+        .map_err(CliError::of)?;
+
+    writeln!(out, "{shortname} is {} ({}).", resolved.label, resolved.environment_id).ok();
+    if let Some(previous) = assignment.replaced_shortname {
+        writeln!(out, "It used to be {previous}.").ok();
+    }
+    if let Some(previous) = assignment.replaced_environment {
+        writeln!(out, "{shortname} used to mean {previous}.").ok();
+    }
+    Ok(())
+}
+
+/// `sv name --remove <shortname>`. Offline: the workspace is untouched.
+pub fn remove_name(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    shortname: &str,
+) -> Result<(), CliError> {
+    let shortname = shortname.trim().to_lowercase();
+    let mut stored =
+        shortnames::read_shortnames(&context.config.state_directory).map_err(CliError::of)?;
+    match stored.remove(&shortname) {
+        None => Err(CliError(format!("There is no workspace named {shortname}."))),
+        Some(environment_id) => {
+            shortnames::write_shortnames(&context.config.state_directory, &stored)
+                .map_err(CliError::of)?;
+            writeln!(out, "{shortname} is no longer a name for {environment_id}.").ok();
+            Ok(())
+        }
+    }
+}
+
 /// `sv shell <machine-or-workspace>`.
 ///
 /// Resolve, connect, then hand the terminal over. The remote shell is
@@ -196,7 +342,10 @@ pub fn shell(
     target: Option<&str>,
     terminal_id: Option<&str>,
 ) -> Result<(), CliError> {
-    open_detached_terminal(context, out, TerminalKind::Shell, target, terminal_id)
+    let (session, view) = load_session_and_view(context)?;
+    let target = crate::target::select_target(&view, &stored_shortnames(context), target)
+        .map_err(CliError::of)?;
+    open_detached_terminal(context, out, TerminalKind::Shell, &session, &target, terminal_id)
 }
 
 /// `sv claude [machine-or-workspace]`.
@@ -212,20 +361,44 @@ pub fn claude(
     target: Option<&str>,
     terminal_id: Option<&str>,
 ) -> Result<(), CliError> {
-    open_detached_terminal(context, out, TerminalKind::Claude, target, terminal_id)
+    let (session, view) = load_session_and_view(context)?;
+    let target = crate::target::select_target(&view, &stored_shortnames(context), target)
+        .map_err(CliError::of)?;
+    open_detached_terminal(context, out, TerminalKind::Claude, &session, &target, terminal_id)
+}
+
+/// Bare `sv` on a terminal: the list, then a shell on what was picked.
+///
+/// Quitting the list is not a failure. Nothing was asked for and nothing went
+/// wrong, so it exits 0 and says nothing — the same as pressing Ctrl-C at a
+/// prompt.
+pub fn pick_and_open_shell(context: &Context<'_>, out: &mut dyn Write) -> Result<(), CliError> {
+    let (session, view) = load_session_and_view(context)?;
+    let shortnames = stored_shortnames(context);
+    let rows = crate::picker::build_picker_rows(&view, &shortnames);
+    if rows.is_empty() {
+        writeln!(out, "{}", view::NO_ENVIRONMENTS).ok();
+        return Ok(());
+    }
+    let Some(chosen) = crate::picker::pick(rows) else {
+        return Ok(());
+    };
+    // Through the ordinary rules, by workspace id: a workspace that cannot be
+    // connected to gets the same sentence it would have got from
+    // `sv shell <id>`, rather than a second explanation written for the picker.
+    let target = crate::target::select_shell_target(&view, &shortnames, &chosen.environment_id)
+        .map_err(CliError::of)?;
+    open_detached_terminal(context, out, TerminalKind::Shell, &session, &target, None)
 }
 
 fn open_detached_terminal(
     context: &Context<'_>,
     out: &mut dyn Write,
     kind: TerminalKind,
-    target: Option<&str>,
+    session: &Session,
+    target: &ShellTarget,
     terminal_id: Option<&str>,
 ) -> Result<(), CliError> {
-    let session = context.current_session()?;
-    let view = load_view(context)?;
-    let target = crate::target::select_target(&view, target).map_err(CliError::of)?;
-
     let dpop_key =
         crate::dpop::load_or_create_key(&context.config.state_directory).map_err(CliError::of)?;
     let connection = crate::shell::connect_workspace(
@@ -235,7 +408,7 @@ fn open_detached_terminal(
             relay_url: &context.config.relay_url,
             client_id: &context.config.client_id,
             access_token: &session.access_token,
-            target: &target,
+            target,
             dpop_key: &dpop_key,
             client_metadata: crate::shell::cli_client_metadata(),
         },

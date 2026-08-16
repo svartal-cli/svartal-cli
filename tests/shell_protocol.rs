@@ -28,11 +28,18 @@ use svartal::shell::{
     self, InputPoll, LocalTerminal, OpenInput, PumpInput, ShellOutcome, TerminalKind,
     describe_shell_outcome, detached_thread_id, terminal_id,
 };
+use svartal::shortnames::Shortnames;
 use svartal::target::{ShellTarget, select_shell_target, select_target};
 use svartal::terminal::{TerminalSize, Utf8Chunker, normalize_size};
 use svartal::view::build_machines_view;
 
 // -- target resolution -----------------------------------------------------
+
+/// Resolution with nothing named. The short-name rules have their own tests in
+/// `shortnames_and_envs.rs`; these are about the rules underneath them.
+fn no_names() -> Shortnames {
+    Shortnames::new()
+}
 
 fn machines_view(second_workspace: bool, presence: &str) -> svartal::view::MachinesView {
     let mut environments = vec![json!({
@@ -82,18 +89,18 @@ fn machines_view(second_workspace: bool, presence: &str) -> svartal::view::Machi
 #[test]
 fn a_workspace_id_wins_over_every_other_match() {
     let view = machines_view(true, "unknown");
-    let target = select_shell_target(&view, "env-primary").unwrap();
+    let target = select_shell_target(&view, &no_names(), "env-primary").unwrap();
     assert_eq!(target.environment_id, "env-primary");
     // Case and surrounding space are not a different answer.
-    assert_eq!(select_shell_target(&view, "  ENV-PRIMARY ").unwrap().environment_id, "env-primary");
+    assert_eq!(select_shell_target(&view, &no_names(), "  ENV-PRIMARY ").unwrap().environment_id, "env-primary");
     // A label resolves too, when it is the only thing that answers.
-    assert_eq!(select_shell_target(&view, "Primary").unwrap().environment_id, "env-primary");
+    assert_eq!(select_shell_target(&view, &no_names(), "Primary").unwrap().environment_id, "env-primary");
 }
 
 #[test]
 fn one_word_for_two_workspaces_is_a_question_not_a_guess() {
     let view = machines_view(true, "unknown");
-    let error = select_shell_target(&view, "workbench").unwrap_err();
+    let error = select_shell_target(&view, &no_names(), "workbench").unwrap_err();
     let message = error.to_string();
     assert!(message.contains("matches more than one workspace"));
     assert!(message.contains("env-primary"));
@@ -104,32 +111,32 @@ fn one_word_for_two_workspaces_is_a_question_not_a_guess() {
 #[test]
 fn a_workspace_you_are_not_linked_to_is_refused_with_the_reason() {
     let view = machines_view(true, "unknown");
-    let error = select_shell_target(&view, "env-second").unwrap_err();
+    let error = select_shell_target(&view, &no_names(), "env-second").unwrap_err();
     assert!(error.to_string().contains("You are not linked to Second"));
 }
 
 #[test]
 fn a_machine_that_reported_itself_offline_is_refused_but_silence_is_not() {
     let offline = machines_view(false, "offline");
-    let error = select_shell_target(&offline, "env-primary").unwrap_err();
+    let error = select_shell_target(&offline, &no_names(), "env-primary").unwrap_err();
     assert!(error.to_string().contains("last reported that it is offline"));
 
     // `unknown` is the normal case for a machine that never checked in.
     let unknown = machines_view(false, "unknown");
-    assert!(select_shell_target(&unknown, "env-primary").is_ok());
+    assert!(select_shell_target(&unknown, &no_names(), "env-primary").is_ok());
 }
 
 #[test]
 fn a_name_nothing_answers_to_lists_what_is_reachable() {
     let view = machines_view(true, "unknown");
-    let error = select_shell_target(&view, "nowhere").unwrap_err();
+    let error = select_shell_target(&view, &no_names(), "nowhere").unwrap_err();
     let message = error.to_string();
     assert!(message.contains("No workspace called nowhere"));
     assert!(message.contains("These are the ones you can reach"));
     assert!(message.contains("env-primary"));
 
     let empty = build_machines_view(&[], &[]);
-    let error = select_shell_target(&empty, "nowhere").unwrap_err();
+    let error = select_shell_target(&empty, &no_names(), "nowhere").unwrap_err();
     assert!(error.to_string().contains("You cannot reach any workspace yet"));
 }
 
@@ -176,17 +183,17 @@ fn a_claude_terminal_lives_in_its_own_namespace_beside_the_shell() {
 fn one_reachable_workspace_needs_no_argument_and_two_do() {
     // `sv claude` with no target: one reachable workspace is not a guess.
     let single = machines_view(false, "unknown");
-    assert_eq!(select_target(&single, None).unwrap().environment_id, "env-primary");
-    assert_eq!(select_target(&single, Some("  ")).unwrap().environment_id, "env-primary");
-    assert_eq!(select_target(&single, Some("Primary")).unwrap().environment_id, "env-primary");
+    assert_eq!(select_target(&single, &no_names(), None).unwrap().environment_id, "env-primary");
+    assert_eq!(select_target(&single, &no_names(), Some("  ")).unwrap().environment_id, "env-primary");
+    assert_eq!(select_target(&single, &no_names(), Some("Primary")).unwrap().environment_id, "env-primary");
 
     // The second workspace in this view is unlinked, so it is not reachable
     // and does not make the choice ambiguous.
     let two = machines_view(true, "unknown");
-    assert_eq!(select_target(&two, None).unwrap().environment_id, "env-primary");
+    assert_eq!(select_target(&two, &no_names(), None).unwrap().environment_id, "env-primary");
 
     let none = svartal::view::build_machines_view(&[], &[]);
-    let error = select_target(&none, None).unwrap_err();
+    let error = select_target(&none, &no_names(), None).unwrap_err();
     assert!(error.to_string().contains("cannot reach any workspace yet"));
 }
 

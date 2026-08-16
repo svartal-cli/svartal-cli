@@ -156,6 +156,95 @@ pub fn format_machines_view(view: &MachinesView) -> String {
     sections.join("\n\n")
 }
 
+// -- environments ----------------------------------------------------------
+
+/// One row of `sv envs`: the same data `sv machines` prints, with the
+/// workspace rather than the machine as the subject, and the short name in
+/// front of it.
+///
+/// A workspace that is linked but sits on no machine this person can list is a
+/// row here too. `sv machines` puts those in a second table because that table
+/// is about machines and they have none; an environment listing has no reason
+/// to separate them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvRow {
+    pub shortname: Option<String>,
+    pub label: String,
+    pub environment_id: String,
+    pub machine_name: Option<String>,
+    pub kind: String,
+    pub lifecycle_state: String,
+    pub linked: bool,
+    pub machine_presence: Option<String>,
+}
+
+pub fn build_env_rows(
+    view: &MachinesView,
+    shortnames: &crate::shortnames::Shortnames,
+) -> Vec<EnvRow> {
+    let mut rows: Vec<EnvRow> = view
+        .rows
+        .iter()
+        .map(|row| EnvRow {
+            shortname: shortnames.shortname_of(&row.environment_id).map(str::to_string),
+            label: row.label.clone(),
+            environment_id: row.environment_id.clone(),
+            machine_name: Some(row.machine_name.clone()),
+            kind: row.kind.clone(),
+            lifecycle_state: row.lifecycle_state.clone(),
+            linked: row.linked,
+            machine_presence: Some(row.machine_presence.clone()),
+        })
+        .collect();
+    for link in &view.unregistered_links {
+        rows.push(EnvRow {
+            shortname: shortnames.shortname_of(&link.environment_id).map(str::to_string),
+            label: link.label.clone(),
+            environment_id: link.environment_id.clone(),
+            machine_name: None,
+            kind: "-".to_string(),
+            lifecycle_state: "-".to_string(),
+            // A link record is the proof of reachability, so these are linked
+            // by definition.
+            linked: true,
+            machine_presence: None,
+        });
+    }
+    rows
+}
+
+pub const NO_ENVIRONMENTS: &str =
+    "No workspaces yet. Register a machine in the Svartal web app, then link it from the box.";
+
+pub fn format_envs_view(rows: &[EnvRow]) -> String {
+    if rows.is_empty() {
+        return NO_ENVIRONMENTS.to_string();
+    }
+    render_table(
+        &["SHORTNAME", "WORKSPACE", "WORKSPACE ID", "MACHINE", "KIND", "STATE", "REACHABLE", "MACHINE"],
+        &rows
+            .iter()
+            .map(|row| {
+                vec![
+                    row.shortname.clone().unwrap_or_else(|| "-".to_string()),
+                    row.label.clone(),
+                    row.environment_id.clone(),
+                    row.machine_name.clone().unwrap_or_else(|| "-".to_string()),
+                    row.kind.clone(),
+                    row.lifecycle_state.clone(),
+                    if row.linked { "linked".to_string() } else { "not linked".to_string() },
+                    row.machine_presence.clone().unwrap_or_else(|| "-".to_string()),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub fn format_envs_json(rows: &[EnvRow]) -> String {
+    pretty(&json!({ "environments": rows }))
+}
+
 pub fn format_sessions_view(view: &MachinesView) -> String {
     let reachable: Vec<&WorkspaceRow> = view.rows.iter().filter(|row| row.linked).collect();
     if reachable.is_empty() {

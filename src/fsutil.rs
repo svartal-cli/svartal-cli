@@ -69,7 +69,7 @@ pub fn ensure_state_directory(path: &Path) -> Result<(), FsError> {
 /// A refresh rotates the token (`ID-25`), so a torn write would leave a
 /// credential that is neither the old one nor the new one — and the old one is
 /// already dead by then. The temporary name carries random bytes rather than
-/// the TypeScript CLI's fixed `.tmp` suffix, so two `svartal` processes writing
+/// the TypeScript CLI's fixed `.tmp` suffix, so two `sv` processes writing
 /// at once cannot clobber each other's half-written file.
 pub fn write_private_file(path: &Path, body: &[u8]) -> Result<(), FsError> {
     let parent = path.parent().ok_or_else(|| err(format!("{} has no parent directory", path.display())))?;
