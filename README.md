@@ -1,7 +1,8 @@
 # svartal-cli
 
 `sv` signs you in to Svartal from a terminal, tells you who you are, lists the
-machines and workspaces you can reach, and opens shells on them. It exists so
+machines and workspaces you can reach, and opens shells and Claude terminals on
+them. It exists so
 the program that holds a refresh token and a DPoP signing key is a small
 static binary with an auditable dependency set. That is the same argument brok
 makes for the machine-side broker.
@@ -25,11 +26,17 @@ the source comments (`ID-9`, `ID-16`, `ID-25`, …) are that document's.
 | `machines`          | yes                | yes         | `--json` too                                                           |
 | `sessions [machine]`| partial            | partial     | lists reachable workspaces; live agent sessions are not readable with a terminal sign-in yet |
 | `shell <target>`    | yes                | yes         | full connect chain, detached terminal namespace, raw-mode byte pump, reattach; `--terminal-id` too |
+| `claude [target]`   | yes                | yes         | the same client in the `svartal-claude:` namespace; the workspace runs Claude inside the machine broker's runner container. The target may be omitted when only one workspace is reachable |
 
 Verified against the npm CLI on the same machine and the same credential:
 `whoami`, `whoami --json`, `machines`, `machines --json` and `sessions --json`
 produce byte-identical output, and `shell` prints the same lines on the same
 workspace (including reattach).
+
+`claude` is the exception: it has not been run against a live workspace yet,
+because it needs a machine running a brok build with the interactive-PTY
+capability, and no deployed machine has one. Both implementations are pinned to
+the same fixtures and the same sentences instead.
 
 Known differences, all deliberate:
 
@@ -60,6 +67,7 @@ sv whoami
 sv machines
 sv sessions workbench
 sv shell workbench  # or a workspace name, or a workspace id
+sv claude workbench # an interactive Claude terminal in that workspace
 sv logout
 ```
 
@@ -68,6 +76,16 @@ is derived from the workspace id, so running it again from anywhere lands in
 the same shell; `--terminal-id <id>` opens a second, separate one. Quitting the
 CLI **detaches** — the remote shell keeps running, and the closing line says so.
 Ending it is an explicit `exit` or Ctrl-D.
+
+`sv claude` is the same command against the sibling namespace
+`svartal-claude:<subject>`, so everything above holds: same connect chain, same
+reattach, same detach-on-quit, `--terminal-id` for a second one. What differs is
+what the workspace starts behind it — Claude's own CLI, running inside the
+machine broker's runner container, because a brokered credential may not leave
+it. The workspace needs a brokered Claude credential for the signed-in account;
+when it has none, is not brokered, or the machine has no broker, the workspace
+says which and `sv claude` prints that sentence unchanged. The target may be
+left out when exactly one workspace is reachable.
 
 Configuration is environment variables, all optional:
 

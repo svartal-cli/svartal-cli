@@ -28,6 +28,8 @@ pub struct ShellTarget {
 pub enum TargetError {
     Ambiguous { argument: String, candidates: String },
     Unknown { argument: String, reachable: String },
+    /// No target was given and more than one workspace could have been meant.
+    Unspecified { reachable: String },
     NotLinked { label: String },
     MachineOffline { label: String },
 }
@@ -46,6 +48,14 @@ impl std::fmt::Display for TargetError {
             Self::Unknown { argument, reachable } => write!(
                 f,
                 "No workspace called {argument}. These are the ones you can reach:\n\n{reachable}"
+            ),
+            Self::Unspecified { reachable } if reachable.is_empty() => write!(
+                f,
+                "You cannot reach any workspace yet; run `sv machines` to see what exists."
+            ),
+            Self::Unspecified { reachable } => write!(
+                f,
+                "Say which workspace, by name or workspace id:\n\n{reachable}"
             ),
             Self::NotLinked { label } => write!(
                 f,
@@ -152,6 +162,37 @@ pub fn format_target_candidates(candidates: &[ShellTarget]) -> String {
             })
             .collect::<Vec<_>>(),
     )
+}
+
+/// The one workspace to connect to when the person named none.
+///
+/// One reachable workspace is not a guess — it is the only thing the words
+/// could have meant. Two are a question, and the answer is the same table
+/// every other refusal prints.
+pub fn select_target(
+    view: &MachinesView,
+    argument: Option<&str>,
+) -> Result<ShellTarget, TargetError> {
+    match argument.map(str::trim).filter(|argument| !argument.is_empty()) {
+        Some(argument) => select_shell_target(view, argument),
+        None => {
+            let reachable: Vec<ShellTarget> =
+                shell_targets(view).into_iter().filter(|target| target.linked).collect();
+            match reachable.len() {
+                1 => select_shell_target(
+                    view,
+                    &reachable.into_iter().next().expect("one target").environment_id,
+                ),
+                _ => Err(TargetError::Unspecified {
+                    reachable: if reachable.is_empty() {
+                        String::new()
+                    } else {
+                        format_target_candidates(&reachable)
+                    },
+                }),
+            }
+        }
+    }
 }
 
 /// The one workspace to connect to, or a refusal that says why.

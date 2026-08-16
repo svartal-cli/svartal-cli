@@ -25,11 +25,13 @@ Commands:
   machines           List the machines and workspaces you can reach.
   sessions [machine] List agent sessions on a machine.
   shell <target>     Open a shell in a workspace you can reach.
+  claude [target]    Open an interactive Claude terminal in a workspace.
 
 Options:
   --json             Emit JSON instead of a table (whoami, machines, sessions).
   --no-browser       Print the sign-in URL instead of opening a browser (login).
-  --terminal-id <id> Open a second, separate shell on the same workspace (shell).
+  --terminal-id <id> Open a second, separate terminal on the same workspace
+                     (shell, claude).
   -h, --help         Show this message.
   -V, --version      Show the version.
 ";
@@ -72,7 +74,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
     // misunderstanding worth saying out loud, not something to ignore.
     let accepted: &[&str] = match command {
         "login" => &["--no-browser"],
-        "shell" => &["--terminal-id"],
+        "shell" | "claude" => &["--terminal-id"],
         "whoami" | "machines" | "sessions" => &["--json"],
         _ => &[],
     };
@@ -126,8 +128,16 @@ fn run(arguments: &[String]) -> Result<(), String> {
                     "`sv shell` needs a machine or workspace to connect to. Run `sv machines` to see them.".to_string(),
                 );
             };
-            commands::shell(&context, &mut stdout, target, terminal_id.as_deref())
+            commands::shell(&context, &mut stdout, Some(target), terminal_id.as_deref())
         }
+        // The target is optional here: a person with one workspace has already
+        // said which one by having only one.
+        "claude" => commands::claude(
+            &context,
+            &mut stdout,
+            positional.first().copied(),
+            terminal_id.as_deref(),
+        ),
         other => {
             return Err(format!(
                 "`{other}` is not a svartal command. Run `svartal --help` to see what is."

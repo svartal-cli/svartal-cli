@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::http::HttpTransport;
 use crate::loopback::{CALLBACK_TIMEOUT, LoopbackError, LoopbackServer};
 use crate::oidc::{OidcClient, OidcConfig, Session};
+use crate::shell::TerminalKind;
 use crate::store::TokenStorage;
 use crate::view;
 
@@ -192,18 +193,45 @@ pub fn machines(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Resul
 pub fn shell(
     context: &Context<'_>,
     out: &mut dyn Write,
-    target: &str,
+    target: Option<&str>,
+    terminal_id: Option<&str>,
+) -> Result<(), CliError> {
+    open_detached_terminal(context, out, TerminalKind::Shell, target, terminal_id)
+}
+
+/// `sv claude [machine-or-workspace]`.
+///
+/// The same command as `sv shell`, in the sibling namespace: what the
+/// workspace starts behind it is an interactive Claude session inside the
+/// machine broker's runner container, because that is the only place a
+/// brokered credential may be used. Everything a person can see here — the
+/// reattach, the raw-mode pump, the closing line — is the shell's, on purpose.
+pub fn claude(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    target: Option<&str>,
+    terminal_id: Option<&str>,
+) -> Result<(), CliError> {
+    open_detached_terminal(context, out, TerminalKind::Claude, target, terminal_id)
+}
+
+fn open_detached_terminal(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    kind: TerminalKind,
+    target: Option<&str>,
     terminal_id: Option<&str>,
 ) -> Result<(), CliError> {
     let session = context.current_session()?;
     let view = load_view(context)?;
-    let target = crate::target::select_shell_target(&view, target).map_err(CliError::of)?;
+    let target = crate::target::select_target(&view, target).map_err(CliError::of)?;
 
     let dpop_key =
         crate::dpop::load_or_create_key(&context.config.state_directory).map_err(CliError::of)?;
     let connection = crate::shell::connect_workspace(
         context.http,
         &crate::shell::ConnectInput {
+            kind,
             relay_url: &context.config.relay_url,
             client_id: &context.config.client_id,
             access_token: &session.access_token,
@@ -216,6 +244,7 @@ pub fn shell(
 
     let transport = crate::ws::WebSocketTransport::connect(&connection.socket_url).map_err(|error| {
         CliError::of(crate::shell::ShellError::Connection {
+            kind,
             label: target.label.clone(),
             detail: error.to_string(),
         })
@@ -226,6 +255,7 @@ pub fn shell(
     let shell_session = crate::shell::open_shell(
         &mut rpc,
         &crate::shell::OpenInput {
+            kind,
             label: &target.label,
             subject: &session.user.sub,
             terminal_id,
@@ -239,9 +269,14 @@ pub fn shell(
         out,
         "{}",
         if shell_session.reattached {
-            format!("Back in your shell on {} ({}).", target.label, shell_session.cwd)
+            format!(
+                "Back in your {} on {} ({}).",
+                kind.noun(),
+                target.label,
+                shell_session.cwd
+            )
         } else {
-            format!("Shell on {} ({}).", target.label, shell_session.cwd)
+            format!("{} on {} ({}).", kind.title(), target.label, shell_session.cwd)
         }
     )
     .ok();
@@ -263,7 +298,7 @@ pub fn shell(
     rpc.transport_mut().close();
 
     let outcome = outcome.map_err(CliError::of)?;
-    writeln!(out, "{}", crate::shell::describe_shell_outcome(&outcome, &target.label)).ok();
+    writeln!(out, "{}", crate::shell::describe_shell_outcome(kind, &outcome, &target.label)).ok();
     Ok(())
 }
 

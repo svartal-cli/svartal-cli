@@ -25,10 +25,10 @@ use svartal::api::{LinkRecord, Machine};
 use svartal::dpop::{DpopKey, PrivateJwk};
 use svartal::rpc::{RpcClient, RpcTransport, TransportError};
 use svartal::shell::{
-    self, InputPoll, LocalTerminal, OpenInput, PumpInput, ShellOutcome, describe_shell_outcome,
-    detached_thread_id, shell_terminal_id,
+    self, InputPoll, LocalTerminal, OpenInput, PumpInput, ShellOutcome, TerminalKind,
+    describe_shell_outcome, detached_thread_id, terminal_id,
 };
-use svartal::target::{ShellTarget, select_shell_target};
+use svartal::target::{ShellTarget, select_shell_target, select_target};
 use svartal::terminal::{TerminalSize, Utf8Chunker, normalize_size};
 use svartal::view::build_machines_view;
 
@@ -136,19 +136,58 @@ fn a_name_nothing_answers_to_lists_what_is_reachable() {
 #[test]
 fn the_terminal_id_is_derived_from_the_workspace_id() {
     let fixture = fixture("shell.json");
+    let shell = TerminalKind::Shell;
     assert_eq!(
-        shell_terminal_id(fixture["environmentId"].as_str().unwrap()),
+        terminal_id(shell, fixture["environmentId"].as_str().unwrap()),
         fixture["terminalId"].as_str().unwrap()
     );
-    assert_eq!(shell_terminal_id("a b/c"), "shell-a-b-c");
-    assert_eq!(shell_terminal_id("///"), "shell-workspace");
-    assert_eq!(shell_terminal_id(""), "shell-workspace");
-    assert_eq!(shell_terminal_id("-lead-and-trail-"), "shell-lead-and-trail");
-    assert!(shell_terminal_id(&"x".repeat(400)).len() <= 128);
+    assert_eq!(terminal_id(shell, "a b/c"), "shell-a-b-c");
+    assert_eq!(terminal_id(shell, "///"), "shell-workspace");
+    assert_eq!(terminal_id(shell, ""), "shell-workspace");
+    assert_eq!(terminal_id(shell, "-lead-and-trail-"), "shell-lead-and-trail");
+    assert!(terminal_id(shell, &"x".repeat(400)).len() <= 128);
     assert_eq!(
-        detached_thread_id(fixture["subject"].as_str().unwrap()),
+        detached_thread_id(shell, fixture["subject"].as_str().unwrap()),
         fixture["threadId"].as_str().unwrap()
     );
+}
+
+#[test]
+fn a_claude_terminal_lives_in_its_own_namespace_beside_the_shell() {
+    let fixture = fixture("shell.json");
+    let subject = fixture["subject"].as_str().unwrap();
+    let environment = fixture["environmentId"].as_str().unwrap();
+    // Same subject, same workspace, two terminals: the prefixes are what keep
+    // a person's shell and their Claude session apart.
+    assert_eq!(detached_thread_id(TerminalKind::Claude, subject), format!("svartal-claude:{subject}"));
+    assert_ne!(
+        detached_thread_id(TerminalKind::Claude, subject),
+        detached_thread_id(TerminalKind::Shell, subject)
+    );
+    assert_eq!(
+        terminal_id(TerminalKind::Claude, environment),
+        format!("claude-{}", &fixture["terminalId"].as_str().unwrap()["shell-".len()..])
+    );
+    assert_eq!(terminal_id(TerminalKind::Claude, "a b/c"), "claude-a-b-c");
+    assert!(terminal_id(TerminalKind::Claude, &"x".repeat(400)).len() <= 128);
+}
+
+#[test]
+fn one_reachable_workspace_needs_no_argument_and_two_do() {
+    // `sv claude` with no target: one reachable workspace is not a guess.
+    let single = machines_view(false, "unknown");
+    assert_eq!(select_target(&single, None).unwrap().environment_id, "env-primary");
+    assert_eq!(select_target(&single, Some("  ")).unwrap().environment_id, "env-primary");
+    assert_eq!(select_target(&single, Some("Primary")).unwrap().environment_id, "env-primary");
+
+    // The second workspace in this view is unlinked, so it is not reachable
+    // and does not make the choice ambiguous.
+    let two = machines_view(true, "unknown");
+    assert_eq!(select_target(&two, None).unwrap().environment_id, "env-primary");
+
+    let none = svartal::view::build_machines_view(&[], &[]);
+    let error = select_target(&none, None).unwrap_err();
+    assert!(error.to_string().contains("cannot reach any workspace yet"));
 }
 
 // -- the connect chain -----------------------------------------------------
@@ -240,6 +279,7 @@ fn the_connect_chain_makes_the_same_four_requests_as_the_reference() {
     let connection = shell::connect_workspace(
         &http,
         &shell::ConnectInput {
+            kind: TerminalKind::Shell,
             relay_url: fixture["relayUrl"].as_str().unwrap(),
             client_id: "svartal-cli",
             access_token: "oidc-access-token",
@@ -326,6 +366,7 @@ fn the_workspace_token_asks_for_both_scopes() {
     shell::connect_workspace(
         &http,
         &shell::ConnectInput {
+            kind: TerminalKind::Shell,
             relay_url: fixture["relayUrl"].as_str().unwrap(),
             client_id: "svartal-cli",
             access_token: "oidc-access-token",
@@ -393,6 +434,7 @@ fn a_grant_without_terminals_says_so_in_its_own_words() {
     let error = shell::connect_workspace(
         &http,
         &shell::ConnectInput {
+            kind: TerminalKind::Shell,
             relay_url: fixture["relayUrl"].as_str().unwrap(),
             client_id: "svartal-cli",
             access_token: "oidc-access-token",
@@ -512,6 +554,7 @@ fn the_rpc_frames_match_the_reference_client() {
     let session = shell::open_shell(
         &mut rpc,
         &OpenInput {
+            kind: TerminalKind::Shell,
             label: "Primary",
             subject: fixture["subject"].as_str().unwrap(),
             terminal_id: None,
@@ -596,6 +639,7 @@ fn a_reattached_shell_is_recognised_by_its_running_pid() {
     let session = shell::open_shell(
         &mut rpc,
         &OpenInput {
+            kind: TerminalKind::Shell,
             label: "Primary",
             subject: fixture["subject"].as_str().unwrap(),
             terminal_id: None,
@@ -605,6 +649,72 @@ fn a_reattached_shell_is_recognised_by_its_running_pid() {
     )
     .unwrap();
     assert!(session.reattached);
+}
+
+#[test]
+fn a_terminal_that_could_not_start_says_what_the_workspace_said() {
+    // The workspace opens the terminal, then fails to start what belongs
+    // behind it: no authorized Claude credential, a credential that is not
+    // brokered, no broker on that machine at all. It puts the reason on the
+    // terminal's own screen, and the CLI repeats it word for word rather than
+    // inventing a friendlier sentence that says less.
+    let fixture = fixture("shell.json");
+    let config = fixture["serverFrames"][0].clone();
+    let refusal = "Credential 'Claude work account' is not delivered through the machine broker, \
+                   so it cannot run an interactive Claude terminal.";
+    let failed = json!({
+        "_tag": "Exit",
+        "requestId": "1",
+        "exit": {
+            "_tag": "Success",
+            "value": {
+                "threadId": "svartal-claude:user-1",
+                "terminalId": "claude-env-primary",
+                "cwd": fixture["workspaceCwd"],
+                "worktreePath": null,
+                "status": "error",
+                "pid": null,
+                "history": format!("{refusal}\n"),
+                "exitCode": null,
+                "exitSignal": null,
+                "label": "Claude",
+                "updatedAt": "2026-07-30T12:00:00.000Z",
+            },
+        },
+    });
+    let transport = ScriptedTransport::new(&[config, failed], vec![1, 2]);
+    let mut rpc = RpcClient::new(transport);
+    let error = shell::open_shell(
+        &mut rpc,
+        &OpenInput {
+            kind: TerminalKind::Claude,
+            label: "Primary",
+            subject: "user-1",
+            terminal_id: None,
+            environment_id: "env-primary",
+            size: normalize_size(Some(80), Some(24)),
+        },
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.starts_with("Could not start your Claude terminal on Primary: "));
+    assert!(message.contains(refusal), "the workspace's own sentence, verbatim: {message}");
+}
+
+#[test]
+fn every_way_a_claude_terminal_ends_has_the_claude_sentence() {
+    assert_eq!(
+        describe_shell_outcome(TerminalKind::Claude, &ShellOutcome::Exited { exit_code: None }, "Primary"),
+        "Claude on Primary ended."
+    );
+    assert_eq!(
+        describe_shell_outcome(TerminalKind::Claude, &ShellOutcome::Closed, "Primary"),
+        "Claude on Primary was closed."
+    );
+    assert_eq!(
+        describe_shell_outcome(TerminalKind::Claude, &ShellOutcome::Detached, "Primary"),
+        "Left the Claude terminal on Primary running. Run the same command to pick it up again."
+    );
 }
 
 #[test]
@@ -627,6 +737,7 @@ fn a_namespace_refusal_is_told_apart_from_every_other_failure() {
     let error = shell::open_shell(
         &mut rpc,
         &OpenInput {
+            kind: TerminalKind::Shell,
             label: "Primary",
             subject: "someone",
             terminal_id: Some("shell-x"),
@@ -643,23 +754,23 @@ fn a_namespace_refusal_is_told_apart_from_every_other_failure() {
 #[test]
 fn every_way_a_shell_ends_has_its_own_sentence() {
     assert_eq!(
-        describe_shell_outcome(&ShellOutcome::Exited { exit_code: Some(0) }, "Primary"),
+        describe_shell_outcome(TerminalKind::Shell, &ShellOutcome::Exited { exit_code: Some(0) }, "Primary"),
         "Shell on Primary ended."
     );
     assert_eq!(
-        describe_shell_outcome(&ShellOutcome::Exited { exit_code: None }, "Primary"),
+        describe_shell_outcome(TerminalKind::Shell, &ShellOutcome::Exited { exit_code: None }, "Primary"),
         "Shell on Primary ended."
     );
     assert_eq!(
-        describe_shell_outcome(&ShellOutcome::Exited { exit_code: Some(3) }, "Primary"),
+        describe_shell_outcome(TerminalKind::Shell, &ShellOutcome::Exited { exit_code: Some(3) }, "Primary"),
         "Shell on Primary ended with status 3."
     );
     assert_eq!(
-        describe_shell_outcome(&ShellOutcome::Closed, "Primary"),
+        describe_shell_outcome(TerminalKind::Shell, &ShellOutcome::Closed, "Primary"),
         "Shell on Primary was closed."
     );
     assert_eq!(
-        describe_shell_outcome(&ShellOutcome::Detached, "Primary"),
+        describe_shell_outcome(TerminalKind::Shell, &ShellOutcome::Detached, "Primary"),
         "Left the shell on Primary running. Run the same command to pick it up again."
     );
 }
