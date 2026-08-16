@@ -22,6 +22,7 @@
     "cols": 120,
     "rows": 40
   },
+  "term": "xterm-ghostty",
   "terminalId": "shell-env-fixture-0001",
   "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
   "workspaceCwd": "/home/person/workspace",
@@ -35,8 +36,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://relay.example.com/v1/client/dpop-token",
-        "jti": "003f19ce-a308-47c3-8b9f-5cd3f2a83368",
-        "iat": 1786812761
+        "jti": "e0ffc3a3-eb18-4380-ad8c-f563542de995",
+        "iat": 1786909032
       },
       "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=oidc-access-token&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2F%2Frelay.example.com&scope=environment%3Aconnect&client_id=svartal-cli"
     },
@@ -48,8 +49,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://relay.example.com/v1/environments/env-fixture-0001/connect",
-        "jti": "e1d267a5-a734-4327-9fbf-f912b4106db0",
-        "iat": 1786812761,
+        "jti": "eb1d95c7-6f96-4102-8d06-7c921e68cfd2",
+        "iat": 1786909032,
         "ath": "-M3NHAaxswmcT56jeetLC28qdSxzQTiIKIPCCf03fkE"
       },
       "body": "{\"clientProofKeyThumbprint\":\"qE8IIskYdgrNmuk-iarrpPvJhIZ-jCOUBsJisLa6Yc0\"}"
@@ -62,8 +63,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://workspace.example.com/oauth/token",
-        "jti": "26dc8e5f-8bf2-4b92-b3c6-f36e0bade4a5",
-        "iat": 1786812761
+        "jti": "29e7d325-721e-4086-95da-a8c5bbee7d0c",
+        "iat": 1786909032
       },
       "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=environment-credential&subject_token_type=urn%3At3%3Aparams%3Aoauth%3Atoken-type%3Aenvironment-bootstrap&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&scope=terminal%3Aoperate+orchestration%3Aread&client_label=svartal+CLI&client_device_type=desktop"
     },
@@ -75,8 +76,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://workspace.example.com/api/auth/websocket-ticket",
-        "jti": "a36507de-3179-4ccc-9a56-fc0bca4b888c",
-        "iat": 1786812761,
+        "jti": "f3641d7f-3d87-4d6c-9592-c8024b24e66b",
+        "iat": 1786909032,
         "ath": "3mjY2PMoTuPQLl3VB1HXx7l6gT9NJLvpNDq-1ErvuUw"
       },
       "body": ""
@@ -88,8 +89,8 @@
       "id": "0",
       "tag": "server.getConfig",
       "payload": {},
-      "traceId": "5cd8e8670d2e9b9e08c0ec9e12ecd325",
-      "spanId": "26f3f038a54d92cc",
+      "traceId": "ca167eeb0d97b0f23bc3fbd2a57ba0e2",
+      "spanId": "9db0703654fe3e51",
       "sampled": true,
       "headers": []
     },
@@ -102,10 +103,11 @@
         "terminalId": "shell-env-fixture-0001",
         "cwd": "/home/person/workspace",
         "cols": 120,
-        "rows": 40
+        "rows": 40,
+        "term": "xterm-ghostty"
       },
-      "traceId": "5cd8e8670d2e9b9e08c0ec9e12ecd325",
-      "spanId": "e63fa744e21b30bb",
+      "traceId": "ca167eeb0d97b0f23bc3fbd2a57ba0e2",
+      "spanId": "ff12987052bfcfca",
       "sampled": true,
       "headers": []
     },
@@ -117,10 +119,11 @@
         "threadId": "svartal-shell:11111111-2222-3333-4444-555555555555",
         "terminalId": "shell-env-fixture-0001",
         "cols": 120,
-        "rows": 40
+        "rows": 40,
+        "term": "xterm-ghostty"
       },
-      "traceId": "f0c3ab7397f1790f980bf2f79d1f5c82",
-      "spanId": "9296c3f0bc496388",
+      "traceId": "4c3d94c0534d758fa34a7acd732882e6",
+      "spanId": "8d24aae31ed540ff",
       "sampled": true,
       "headers": []
     },
@@ -141,8 +144,8 @@
         "terminalId": "shell-env-fixture-0001",
         "data": "echo hello\r"
       },
-      "traceId": "f0c3ab7397f1790f980bf2f79d1f5c82",
-      "spanId": "8d101746da648d46",
+      "traceId": "4c3d94c0534d758fa34a7acd732882e6",
+      "spanId": "4b4712fa7e5ecf1a",
       "sampled": true,
       "headers": []
     },
@@ -156,8 +159,8 @@
         "cols": 100,
         "rows": 30
       },
-      "traceId": "f0c3ab7397f1790f980bf2f79d1f5c82",
-      "spanId": "8d862018e7c1ea1c",
+      "traceId": "4c3d94c0534d758fa34a7acd732882e6",
+      "spanId": "fc2f30bdaf5b72a8",
       "sampled": true,
       "headers": []
     },

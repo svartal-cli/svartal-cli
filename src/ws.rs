@@ -10,6 +10,7 @@
 //! for the HTTP calls, so this binary has one TLS stack rather than two.
 
 use std::net::TcpStream;
+use std::os::fd::{AsRawFd, RawFd};
 use std::time::Duration;
 
 use tungstenite::stream::MaybeTlsStream;
@@ -30,7 +31,31 @@ impl WebSocketTransport {
             .map_err(|error| TransportError::Failed(describe(&error)))?;
         let transport = Self { socket };
         transport.set_timeouts(OPEN_TIMEOUT)?;
+        transport.disable_nagle();
         Ok(transport)
+    }
+
+    /// Turn Nagle's algorithm off.
+    ///
+    /// Everything this socket carries is a keystroke or a screen update: small,
+    /// and wanted now. Nagle holds a small write back until the previous one is
+    /// acknowledged, which on a link with real latency turns one keystroke into
+    /// a wait for a whole round trip that has nothing to do with it. That is the
+    /// wrong trade for a terminal, and it is the same reason every ssh client
+    /// sets this.
+    ///
+    /// A socket that refuses the option still works — it is a latency
+    /// improvement, not a requirement — so a failure here is not worth failing
+    /// a shell over.
+    fn disable_nagle(&self) {
+        if let Some(stream) = self.tcp_stream() {
+            let _ = stream.set_nodelay(true);
+        }
+    }
+
+    /// True when the kernel has this socket's Nagle off. Only the tests read it.
+    pub fn is_nodelay(&self) -> bool {
+        self.tcp_stream().is_some_and(|stream| stream.nodelay().unwrap_or(false))
     }
 
     fn tcp_stream(&self) -> Option<&TcpStream> {
@@ -60,6 +85,10 @@ impl WebSocketTransport {
 }
 
 impl RpcTransport for WebSocketTransport {
+    fn readable_fd(&self) -> Option<RawFd> {
+        self.tcp_stream().map(AsRawFd::as_raw_fd)
+    }
+
     fn recv(&mut self, timeout: Duration) -> Result<Option<String>, TransportError> {
         self.set_timeouts(timeout)?;
         match self.socket.read() {

@@ -434,6 +434,7 @@ fn open_detached_terminal(
             terminal_id,
             environment_id: &target.environment_id,
             size,
+            term: crate::shell::local_term(),
         },
     )
     .map_err(CliError::of)?;

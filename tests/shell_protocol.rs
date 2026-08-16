@@ -570,6 +570,7 @@ fn the_rpc_frames_match_the_reference_client() {
                 Some(fixture["size"]["cols"].as_u64().unwrap() as u16),
                 Some(fixture["size"]["rows"].as_u64().unwrap() as u16),
             ),
+            term: fixture["term"].as_str().map(str::to_string),
         },
     )
     .unwrap();
@@ -652,6 +653,7 @@ fn a_reattached_shell_is_recognised_by_its_running_pid() {
             terminal_id: None,
             environment_id: fixture["environmentId"].as_str().unwrap(),
             size: normalize_size(Some(120), Some(40)),
+            term: None,
         },
     )
     .unwrap();
@@ -700,6 +702,7 @@ fn a_terminal_that_could_not_start_says_what_the_workspace_said() {
             terminal_id: None,
             environment_id: "env-primary",
             size: normalize_size(Some(80), Some(24)),
+            term: None,
         },
     )
     .unwrap_err();
@@ -750,6 +753,7 @@ fn a_namespace_refusal_is_told_apart_from_every_other_failure() {
             terminal_id: Some("shell-x"),
             environment_id: "env",
             size: normalize_size(Some(80), Some(24)),
+            term: None,
         },
     )
     .unwrap_err();

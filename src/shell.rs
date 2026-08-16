@@ -23,6 +23,7 @@
 //! interactive Claude session inside the machine broker's runner container,
 //! which is the only place a brokered credential may be used.
 
+use std::os::fd::RawFd;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -101,8 +102,21 @@ pub const METHOD_TERMINAL_RESIZE: &str = "terminal.resize";
 /// Long enough for a workspace that is busy, short enough that a wedged one
 /// does not hold the terminal forever.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long the pump waits on the socket before doing its other work.
+/// The longest the pump ever sleeps without looking at anything.
+///
+/// On a terminal this is a safety net, not the mechanism: the pump waits on the
+/// socket and the keyboard together (see `wait_for_activity`) and wakes the
+/// moment either has something. It is still bounded, because the WebSocket and
+/// TLS layers each keep a buffer of their own, and a frame sitting in one of
+/// those makes no descriptor readable.
 const PUMP_TICK: Duration = Duration::from_millis(50);
+
+/// The socket wait used when the descriptor says there is nothing to read.
+///
+/// Not zero: a zero timeout on a socket means "no timeout", i.e. block forever.
+/// This is the shortest wait that still lets the WebSocket layer hand up a
+/// frame it had already decoded into its own buffer.
+const IDLE_TICK: Duration = Duration::from_millis(1);
 /// `TerminalWriteInput` caps `data` at 64 KiB.
 const MAX_WRITE_BYTES: usize = 65_536;
 
@@ -330,6 +344,8 @@ pub struct ShellSession {
     pub thread_id: String,
     pub terminal_id: String,
     pub cwd: String,
+    /// The `TERM` this session was opened with, replayed on every reattach.
+    pub term: Option<String>,
     /// True when an existing terminal was picked back up rather than started.
     pub reattached: bool,
 }
@@ -342,6 +358,40 @@ pub struct OpenInput<'a> {
     pub terminal_id: Option<&'a str>,
     pub environment_id: &'a str,
     pub size: TerminalSize,
+    /// This terminal's own `TERM`, so the remote PTY is spawned as the terminal
+    /// the person is looking at rather than a fixed guess. `None` leaves the
+    /// workspace on its own default.
+    pub term: Option<String>,
+}
+
+/// The allowlist the workspace's terminal contract enforces on `term`.
+///
+/// The value becomes an environment variable in a process on someone else's
+/// machine, so the CLI does not forward whatever `$TERM` happens to hold: only
+/// letters, digits, and the four characters terminfo names use. Anything else
+/// is not sent, and the workspace uses its default.
+pub fn accepted_term(value: Option<&str>) -> Option<String> {
+    let term = value?.trim();
+    if term.is_empty() || term.len() > 64 {
+        return None;
+    }
+    let accepted = term
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-'));
+    accepted.then(|| term.to_string())
+}
+
+/// This process's `TERM`, when it is one the workspace accepts.
+pub fn local_term() -> Option<String> {
+    accepted_term(std::env::var("TERM").ok().as_deref())
+}
+
+/// Add `term` to a terminal call's payload when there is one to send.
+fn with_term(mut payload: Value, term: Option<&str>) -> Value {
+    if let (Some(term), Some(object)) = (term, payload.as_object_mut()) {
+        object.insert("term".to_string(), Value::String(term.to_string()));
+    }
+    payload
 }
 
 /// Read the workspace's config for the root to open in, then open (or pick up)
@@ -372,13 +422,16 @@ pub fn open_shell<T: RpcTransport>(
     let snapshot = rpc
         .call(
             METHOD_TERMINAL_OPEN,
-            json!({
-                "threadId": thread_id,
-                "terminalId": terminal_id,
-                "cwd": cwd,
-                "cols": input.size.cols,
-                "rows": input.size.rows,
-            }),
+            with_term(
+                json!({
+                    "threadId": thread_id,
+                    "terminalId": terminal_id,
+                    "cwd": cwd,
+                    "cols": input.size.cols,
+                    "rows": input.size.rows,
+                }),
+                input.term.as_deref(),
+            ),
             CALL_TIMEOUT,
         )
         .map_err(|error| terminal_call_error(&error, kind, input.label, input.subject))?;
@@ -403,7 +456,7 @@ pub fn open_shell<T: RpcTransport>(
     let reattached = running
         && (kind == TerminalKind::Claude
             || snapshot.get("pid").is_some_and(|pid| !pid.is_null()));
-    Ok(ShellSession { kind, thread_id, terminal_id, cwd, reattached })
+    Ok(ShellSession { kind, thread_id, terminal_id, cwd, term: input.term.clone(), reattached })
 }
 
 /// The last thing a terminal printed, which for a terminal that failed to
@@ -455,6 +508,39 @@ pub trait LocalTerminal {
     fn take_input(&mut self) -> InputPoll;
     /// True once per local resize.
     fn take_resize(&mut self) -> bool;
+    /// A descriptor that becomes readable when `take_input` has something.
+    ///
+    /// `None` — every test terminal — keeps the old behaviour: the pump waits
+    /// on the socket alone and picks input up on the next tick.
+    fn ready_fd(&self) -> Option<RawFd> {
+        None
+    }
+}
+
+/// Wait until the socket has data, local input is waiting, or the timeout runs
+/// out. Returns whether the *socket* is the one that has something.
+///
+/// This is the whole of the typing-latency fix on the client. A loop that
+/// blocks on the socket and then checks the keyboard adds its own wait to every
+/// keystroke — half the tick on average, a whole tick at worst. Waiting on both
+/// descriptors at once adds nothing at all.
+///
+/// A `poll` that fails is reported as "read the socket", which is exactly the
+/// behaviour this replaced, so an error here costs latency and never
+/// correctness.
+pub fn wait_for_activity(socket: RawFd, input: RawFd, timeout: Duration) -> bool {
+    let mut fds = [
+        libc::pollfd { fd: socket, events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: input, events: libc::POLLIN, revents: 0 },
+    ];
+    let millis = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `poll` reads and writes the two-element array we own, for the
+    // length passed, and does not retain it.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, millis) };
+    if ready < 0 {
+        return true;
+    }
+    fds[0].revents != 0
 }
 
 pub enum InputPoll {
@@ -483,12 +569,15 @@ pub fn run_shell_pump<T: RpcTransport>(
     let attach_id = rpc
         .request(
             METHOD_TERMINAL_ATTACH,
-            json!({
-                "threadId": input.session.thread_id,
-                "terminalId": input.session.terminal_id,
-                "cols": size.cols,
-                "rows": size.rows,
-            }),
+            with_term(
+                json!({
+                    "threadId": input.session.thread_id,
+                    "terminalId": input.session.terminal_id,
+                    "cols": size.cols,
+                    "rows": size.rows,
+                }),
+                input.session.term.as_deref(),
+            ),
         )
         .map_err(|error| terminal_call_error(&error, input.session.kind, input.label, input.subject))?;
 
@@ -507,10 +596,19 @@ fn pump_until_end<T: RpcTransport>(
     attach_id: &str,
 ) -> Result<ShellOutcome, ShellError> {
     let mut outcome = ShellOutcome::Detached;
+    // Both halves have to expose a descriptor for the combined wait; a test
+    // transport or a test terminal exposes neither, and falls back to the tick.
+    let waitable = rpc.readable_fd().zip(terminal.ready_fd());
     loop {
         rpc.ping_if_due().map_err(|error| connection_error(input.session.kind, input.label, error))?;
 
-        let messages = rpc.pump(PUMP_TICK).map_err(|error| connection_error(input.session.kind, input.label, error))?;
+        let socket_wait = match waitable {
+            None => PUMP_TICK,
+            Some((socket, ready)) => {
+                if wait_for_activity(socket, ready, PUMP_TICK) { PUMP_TICK } else { IDLE_TICK }
+            }
+        };
+        let messages = rpc.pump(socket_wait).map_err(|error| connection_error(input.session.kind, input.label, error))?;
         for message in messages {
             match message {
                 Incoming::Chunk { ref request_id, ref values } if request_id == attach_id => {

@@ -126,6 +126,15 @@ impl std::fmt::Display for TransportError {
 pub trait RpcTransport {
     fn recv(&mut self, timeout: Duration) -> Result<Option<String>, TransportError>;
     fn send(&mut self, text: &str) -> Result<(), TransportError>;
+
+    /// The descriptor that becomes readable when the workspace sends something.
+    ///
+    /// A caller that has one can wait on it alongside its own descriptors and
+    /// stop polling. `None` — the test transports — keeps the timeout-driven
+    /// behaviour, so nothing about the protocol depends on this.
+    fn readable_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
 }
 
 /// A decoded server message.
@@ -169,6 +178,11 @@ impl<T: RpcTransport> RpcClient<T> {
 
     pub fn transport_mut(&mut self) -> &mut T {
         &mut self.transport
+    }
+
+    /// See `RpcTransport::readable_fd`.
+    pub fn readable_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.transport.readable_fd()
     }
 
     /// Send a request and return the id its responses will carry.

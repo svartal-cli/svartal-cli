@@ -41,7 +41,7 @@ const fromIvaldi = (specifier) => import(pathToFileURL(requireFromIvaldi.resolve
 const fromSource = (...segments) => import(pathToFileURL(NodePath.join(packages, ...segments)).href);
 
 const { importDpopKey } = await fromSource("shared", "src", "dpopProof.ts");
-const { openShellSession, runShellPump, shellTerminalId } = await fromSource(
+const { openShellSession, runShellPump, detachedTerminalId } = await fromSource(
   "svartal-cli",
   "src",
   "shell.ts",
@@ -67,6 +67,9 @@ const ENVIRONMENT_ID = "env-fixture-0001";
 const SUBJECT = "11111111-2222-3333-4444-555555555555";
 const WORKSPACE_CWD = "/home/person/workspace";
 const SIZE = { cols: 120, rows: 40 };
+// The client forwards its own TERM so the remote PTY is spawned as the terminal
+// the person is looking at. Pinned here so the fixture records the field.
+const TERM = "xterm-ghostty";
 const PRIVATE_JWK = {
   kty: "EC",
   crv: "P-256",
@@ -253,7 +256,7 @@ const SERVER_CONFIG = {
   settings: contracts.DEFAULT_SERVER_SETTINGS,
 };
 
-const TERMINAL_ID = shellTerminalId(ENVIRONMENT_ID);
+const TERMINAL_ID = detachedTerminalId("shell", ENVIRONMENT_ID);
 const THREAD_ID = `svartal-shell:${SUBJECT}`;
 
 const snapshot = (values) => ({
@@ -321,6 +324,7 @@ const program = Effect.gen(function* () {
     target: TARGET,
     dpopKey: key,
     size: SIZE,
+    term: TERM,
     clientMetadata: { label: "svartal CLI", deviceType: "desktop" },
   });
   const outcome = yield* runShellPump({
@@ -383,6 +387,7 @@ await NodeFs.writeFile(
       privateJwk: PRIVATE_JWK,
       target: TARGET,
       size: SIZE,
+      term: TERM,
       terminalId: TERMINAL_ID,
       threadId: THREAD_ID,
       workspaceCwd: WORKSPACE_CWD,

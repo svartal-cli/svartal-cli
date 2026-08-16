@@ -11,6 +11,7 @@
 //! before re-raising. A terminal left raw is a terminal the person has to close.
 
 use std::io::Write as _;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -205,13 +206,86 @@ pub enum Input {
     Ended,
 }
 
+/// What the reader thread hands the main loop: the messages, and a descriptor
+/// that becomes readable the moment one of them is waiting.
+///
+/// The descriptor exists so the pump can wait on the socket and on the keyboard
+/// at the same time. Without it the loop has to pick one to block on and poll
+/// the other, and whichever it polls pays that interval on every keystroke.
+pub struct InputReader {
+    pub messages: Receiver<Input>,
+    /// `None` when the pipe could not be created; the caller then falls back to
+    /// polling, which is slower but correct.
+    pub ready: Option<OwnedFd>,
+}
+
+/// A pipe whose read end is only ever used as a readiness signal.
+pub fn signal_pipe() -> Option<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `pipe` writes exactly two descriptors into the array we own.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: both descriptors are fresh, owned by this process, and handed to
+    // `OwnedFd` exactly once.
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    // Non-blocking on both ends: draining must never block the pump, and a
+    // signal must never block the reader thread if the pipe ever filled up.
+    set_nonblocking(read.as_raw_fd());
+    set_nonblocking(write.as_raw_fd());
+    Some((read, write))
+}
+
+fn set_nonblocking(fd: RawFd) {
+    // SAFETY: `fcntl` reads and sets flags on a descriptor this process owns.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+}
+
+/// Wake whoever is waiting on the read end. One byte, and a full pipe is not an
+/// error: a full pipe means the pump already has more wakeups queued than it has
+/// processed.
+pub fn signal(fd: RawFd) {
+    let byte = 1u8;
+    // SAFETY: writing one byte we own to a descriptor this thread owns.
+    unsafe {
+        libc::write(fd, std::ptr::from_ref(&byte).cast(), 1);
+    }
+}
+
+/// Consume one queued wakeup, if there is one.
+pub fn clear_one_signal(fd: RawFd) {
+    let mut byte = 0u8;
+    // SAFETY: reading one byte into storage we own, on a non-blocking
+    // descriptor, so this returns immediately whether or not one was queued.
+    unsafe {
+        libc::read(fd, std::ptr::from_mut(&mut byte).cast(), 1);
+    }
+}
+
 /// Read stdin on its own thread and hand complete UTF-8 to the main loop.
 ///
 /// `libc::read` rather than `std::io::stdin`, because the shell needs each
 /// keystroke as it lands and not whatever a `BufReader` decides to hold.
-pub fn spawn_input_reader() -> Receiver<Input> {
+pub fn spawn_input_reader() -> InputReader {
     let (sender, receiver): (Sender<Input>, Receiver<Input>) = channel();
+    let pipe = signal_pipe();
+    let (ready, notify) = match pipe {
+        Some((read, write)) => (Some(read), Some(write)),
+        None => (None, None),
+    };
     std::thread::spawn(move || {
+        // The write end lives exactly as long as this thread.
+        let notify = notify;
+        let wake = || {
+            if let Some(fd) = notify.as_ref() {
+                signal(fd.as_raw_fd());
+            }
+        };
         let mut chunker = Utf8Chunker::default();
         let mut buffer = [0u8; 4096];
         loop {
@@ -222,8 +296,14 @@ pub fn spawn_input_reader() -> Receiver<Input> {
             };
             if read > 0 {
                 let text = chunker.push(&buffer[..read as usize]);
-                if !text.is_empty() && sender.send(Input::Data(text)).is_err() {
-                    return;
+                if !text.is_empty() {
+                    if sender.send(Input::Data(text)).is_err() {
+                        return;
+                    }
+                    // Always after the send, never before: the pump must never
+                    // wake to an empty channel and go back to sleep with the
+                    // keystroke still in flight.
+                    wake();
                 }
                 continue;
             }
@@ -234,10 +314,11 @@ pub fn spawn_input_reader() -> Receiver<Input> {
                 }
             }
             let _ = sender.send(Input::Ended);
+            wake();
             return;
         }
     });
-    receiver
+    InputReader { messages: receiver, ready }
 }
 
 /// One blocking read of local input, on the calling thread. `None` is end of
@@ -313,12 +394,19 @@ pub fn write_output(data: &str) {
 pub struct ProcessTerminal {
     interactive: bool,
     input: Receiver<Input>,
+    ready: Option<OwnedFd>,
     ended: bool,
 }
 
 impl ProcessTerminal {
     pub fn new(interactive: bool) -> Self {
-        Self { interactive, input: spawn_input_reader(), ended: false }
+        let reader = spawn_input_reader();
+        Self {
+            interactive,
+            input: reader.messages,
+            ready: reader.ready,
+            ended: false,
+        }
     }
 }
 
@@ -331,9 +419,19 @@ impl crate::shell::LocalTerminal for ProcessTerminal {
         write_output(data);
     }
 
+    fn ready_fd(&self) -> Option<RawFd> {
+        self.ready.as_ref().map(AsRawFd::as_raw_fd)
+    }
+
     fn take_input(&mut self) -> crate::shell::InputPoll {
         if self.ended {
             return crate::shell::InputPoll::Ended;
+        }
+        // One wakeup per message, consumed one at a time, so a second message
+        // that arrived while the first was being sent still leaves the
+        // descriptor readable and the pump comes straight back for it.
+        if let Some(fd) = self.ready_fd() {
+            clear_one_signal(fd);
         }
         match self.input.try_recv() {
             Ok(Input::Data(data)) => crate::shell::InputPoll::Data(data),
