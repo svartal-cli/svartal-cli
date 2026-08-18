@@ -435,6 +435,7 @@ fn open_detached_terminal(
             environment_id: &target.environment_id,
             size,
             term: crate::shell::local_term(),
+            colorterm: crate::shell::local_colorterm(),
         },
     )
     .map_err(CliError::of)?;

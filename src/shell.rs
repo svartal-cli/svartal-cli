@@ -346,6 +346,8 @@ pub struct ShellSession {
     pub cwd: String,
     /// The `TERM` this session was opened with, replayed on every reattach.
     pub term: Option<String>,
+    /// The `COLORTERM` this session was opened with, replayed on every reattach.
+    pub colorterm: Option<String>,
     /// True when an existing terminal was picked back up rather than started.
     pub reattached: bool,
 }
@@ -362,6 +364,10 @@ pub struct OpenInput<'a> {
     /// the person is looking at rather than a fixed guess. `None` leaves the
     /// workspace on its own default.
     pub term: Option<String>,
+    /// This terminal's own `COLORTERM`, so a program on the far side knows
+    /// whether 24-bit colour renders here. `None` means the workspace sets
+    /// none either: there is no default to fall back to.
+    pub colorterm: Option<String>,
 }
 
 /// The allowlist the workspace's terminal contract enforces on `term`.
@@ -386,12 +392,75 @@ pub fn local_term() -> Option<String> {
     accepted_term(std::env::var("TERM").ok().as_deref())
 }
 
-/// Add `term` to a terminal call's payload when there is one to send.
-fn with_term(mut payload: Value, term: Option<&str>) -> Value {
-    if let (Some(term), Some(object)) = (term, payload.as_object_mut()) {
-        object.insert("term".to_string(), Value::String(term.to_string()));
+/// The allowlist the workspace's terminal contract enforces on `colorterm`.
+///
+/// The same reasoning as `accepted_term`, with a lower ceiling: the values in
+/// use are short words (`truecolor`, `24bit`), not terminfo names.
+pub fn accepted_colorterm(value: Option<&str>) -> Option<String> {
+    let colorterm = value?.trim();
+    if colorterm.is_empty() || colorterm.len() > 32 {
+        return None;
+    }
+    let accepted = colorterm
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-'));
+    accepted.then(|| colorterm.to_string())
+}
+
+/// This process's `COLORTERM`, when it is one the workspace accepts.
+///
+/// `TERM` names a terminfo entry; `COLORTERM` is the separate convention that
+/// says "this terminal really renders 24-bit colour", and agent TUIs read it
+/// before they emit truecolour escapes. Sending nothing is a real answer: the
+/// workspace has no default, because claiming truecolour for a terminal that
+/// cannot do it makes programs print escape sequences as literal text.
+pub fn local_colorterm() -> Option<String> {
+    accepted_colorterm(std::env::var("COLORTERM").ok().as_deref())
+}
+
+/// Add an optional string field to a terminal call's payload when there is one
+/// to send. An absent value sends no key at all, not an explicit null.
+fn with_optional(mut payload: Value, key: &str, value: Option<&str>) -> Value {
+    if let (Some(value), Some(object)) = (value, payload.as_object_mut()) {
+        object.insert(key.to_string(), Value::String(value.to_string()));
     }
     payload
+}
+
+/// Add `term` and `colorterm` to a terminal call's payload.
+fn with_terminal_description(
+    payload: Value,
+    term: Option<&str>,
+    colorterm: Option<&str>,
+) -> Value {
+    with_optional(with_optional(payload, "term", term), "colorterm", colorterm)
+}
+
+/// Whether the workspace handed back a terminal that was already running.
+///
+/// The workspace answers this itself, in `created`: it either spawned a process
+/// or found one, and it is the only party that can tell the two apart. The
+/// branch below it is what this CLI had to do before that field existed, kept
+/// only for a workspace image that has not been updated yet.
+///
+/// That old guess is wrong, and visibly so. A freshly spawned PTY is reported
+/// `running` with a pid within milliseconds, so "running with a pid" is true of
+/// a shell that has never existed before — every new terminal was greeted with
+/// "Back in your shell". A provider terminal has no local pid at all, so there
+/// the guess degraded further, to "running at all", which is true of every
+/// provider terminal the moment it starts.
+///
+/// It stays as a fallback because the alternative is worse: against an older
+/// workspace, reading a missing field as "not reattached" would tell a person
+/// their long-running Claude session is a new one.
+fn was_reattached(snapshot: &Value, kind: TerminalKind) -> bool {
+    if let Some(created) = snapshot.get("created").and_then(Value::as_bool) {
+        return !created;
+    }
+    let running = snapshot.get("status").and_then(Value::as_str) == Some("running");
+    running
+        && (kind == TerminalKind::Claude
+            || snapshot.get("pid").is_some_and(|pid| !pid.is_null()))
 }
 
 /// Read the workspace's config for the root to open in, then open (or pick up)
@@ -422,7 +491,7 @@ pub fn open_shell<T: RpcTransport>(
     let snapshot = rpc
         .call(
             METHOD_TERMINAL_OPEN,
-            with_term(
+            with_terminal_description(
                 json!({
                     "threadId": thread_id,
                     "terminalId": terminal_id,
@@ -431,6 +500,7 @@ pub fn open_shell<T: RpcTransport>(
                     "rows": input.size.rows,
                 }),
                 input.term.as_deref(),
+                input.colorterm.as_deref(),
             ),
             CALL_TIMEOUT,
         )
@@ -448,15 +518,16 @@ pub fn open_shell<T: RpcTransport>(
         });
     }
 
-    // A freshly spawned PTY comes back `starting` with no pid; a terminal that
-    // was already running comes back running, with the pid it has had all
-    // along. A provider terminal has no local pid at all, so a running status
-    // is enough there: its process is in the runner container.
-    let running = snapshot.get("status").and_then(Value::as_str) == Some("running");
-    let reattached = running
-        && (kind == TerminalKind::Claude
-            || snapshot.get("pid").is_some_and(|pid| !pid.is_null()));
-    Ok(ShellSession { kind, thread_id, terminal_id, cwd, term: input.term.clone(), reattached })
+    let reattached = was_reattached(&snapshot, kind);
+    Ok(ShellSession {
+        kind,
+        thread_id,
+        terminal_id,
+        cwd,
+        term: input.term.clone(),
+        colorterm: input.colorterm.clone(),
+        reattached,
+    })
 }
 
 /// The last thing a terminal printed, which for a terminal that failed to
@@ -569,7 +640,7 @@ pub fn run_shell_pump<T: RpcTransport>(
     let attach_id = rpc
         .request(
             METHOD_TERMINAL_ATTACH,
-            with_term(
+            with_terminal_description(
                 json!({
                     "threadId": input.session.thread_id,
                     "terminalId": input.session.terminal_id,
@@ -577,6 +648,7 @@ pub fn run_shell_pump<T: RpcTransport>(
                     "rows": size.rows,
                 }),
                 input.session.term.as_deref(),
+                input.session.colorterm.as_deref(),
             ),
         )
         .map_err(|error| terminal_call_error(&error, input.session.kind, input.label, input.subject))?;

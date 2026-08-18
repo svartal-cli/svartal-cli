@@ -9,7 +9,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd as _;
 use std::time::{Duration, Instant};
 
-use svartal::shell::{accepted_term, wait_for_activity};
+use svartal::shell::{accepted_colorterm, accepted_term, wait_for_activity};
 use svartal::terminal::{clear_one_signal, signal, signal_pipe};
 use svartal::ws::WebSocketTransport;
 
@@ -186,6 +186,48 @@ fn the_terminal_type_sent_to_a_workspace_is_an_allowlist() {
     assert_eq!(
         accepted_term(Some("  xterm-256color  ")).as_deref(),
         Some("xterm-256color"),
+        "surrounding whitespace is trimmed, not refused"
+    );
+}
+
+/// `COLORTERM` is the value that decides whether truecolour renders at all, and
+/// it travels the same way `TERM` does: an allowlist, with silence as the
+/// fallback. Silence is a real answer here — the workspace has no default,
+/// because claiming truecolour for a terminal that cannot do it makes programs
+/// print escape sequences as text.
+#[test]
+fn the_colour_capability_sent_to_a_workspace_is_an_allowlist() {
+    for accepted in ["truecolor", "24bit", "8bit", "1", "rxvt-xpm", &"x".repeat(32)] {
+        assert_eq!(
+            accepted_colorterm(Some(accepted)).as_deref(),
+            Some(accepted),
+            "{accepted} is a colour capability and must be forwarded"
+        );
+    }
+
+    for refused in [
+        "",
+        "   ",
+        "true color",
+        "truecolor;id",
+        "truecolor\nCOLORTERM=",
+        "truecolor=1",
+        "../../etc",
+        "truecolor$(id)",
+        &"x".repeat(33),
+    ] {
+        assert_eq!(
+            accepted_colorterm(Some(refused)),
+            None,
+            "{refused:?} becomes an environment variable on someone else's machine and must not \
+             be forwarded"
+        );
+    }
+
+    assert_eq!(accepted_colorterm(None), None, "no COLORTERM here means none on the wire");
+    assert_eq!(
+        accepted_colorterm(Some("  truecolor  ")).as_deref(),
+        Some("truecolor"),
         "surrounding whitespace is trimmed, not refused"
     );
 }

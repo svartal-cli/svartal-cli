@@ -169,6 +169,7 @@ fn measure(expose_ready: bool) -> Vec<Duration> {
         terminal_id: "shell-probe".to_string(),
         cwd: "/workspace".to_string(),
         term: None,
+        colorterm: None,
         reattached: false,
     };
     let _ = run_shell_pump(

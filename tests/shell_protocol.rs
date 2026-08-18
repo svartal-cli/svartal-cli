@@ -571,6 +571,7 @@ fn the_rpc_frames_match_the_reference_client() {
                 Some(fixture["size"]["rows"].as_u64().unwrap() as u16),
             ),
             term: fixture["term"].as_str().map(str::to_string),
+            colorterm: None,
         },
     )
     .unwrap();
@@ -618,6 +619,166 @@ fn the_rpc_frames_match_the_reference_client() {
     }
 }
 
+/// Open a shell against one scripted `terminal.open` answer, and hand back both
+/// the session and the payload the CLI put on the wire.
+fn open_against(
+    kind: TerminalKind,
+    open_value: Value,
+    term: Option<&str>,
+    colorterm: Option<&str>,
+) -> (shell::ShellSession, Vec<Value>) {
+    let fixture = fixture("shell.json");
+    let config = fixture["serverFrames"][0].clone();
+    let open = json!({
+        "_tag": "Exit",
+        "requestId": "1",
+        "exit": { "_tag": "Success", "value": open_value },
+    });
+    let transport = ScriptedTransport::new(&[config, open], vec![1, 2]);
+    let mut rpc = RpcClient::new(transport);
+    let session = shell::open_shell(
+        &mut rpc,
+        &OpenInput {
+            kind,
+            label: "Primary",
+            subject: fixture["subject"].as_str().unwrap(),
+            terminal_id: None,
+            environment_id: fixture["environmentId"].as_str().unwrap(),
+            size: normalize_size(Some(120), Some(40)),
+            term: term.map(str::to_string),
+            colorterm: colorterm.map(str::to_string),
+        },
+    )
+    .unwrap();
+    let sent = rpc.transport_mut().outgoing.clone();
+    (session, sent)
+}
+
+/// A `terminal.open` answer, with whatever the test wants to say on top.
+fn open_snapshot(values: Value) -> Value {
+    let fixture = fixture("shell.json");
+    let mut snapshot = json!({
+        "threadId": fixture["threadId"],
+        "terminalId": fixture["terminalId"],
+        "cwd": fixture["workspaceCwd"],
+        "worktreePath": null,
+        "status": "starting",
+        "pid": null,
+        "history": "",
+        "exitCode": null,
+        "exitSignal": null,
+        "label": "shell",
+        "updatedAt": "2026-07-30T12:00:00.000Z",
+    });
+    let (Some(target), Some(values)) = (snapshot.as_object_mut(), values.as_object()) else {
+        return snapshot;
+    };
+    for (key, value) in values {
+        target.insert(key.clone(), value.clone());
+    }
+    snapshot
+}
+
+/// The one thing a client cannot work out for itself.
+///
+/// A freshly spawned PTY is reported `running` with a pid within milliseconds,
+/// so the old guess called a shell that had never existed a reattach — and
+/// said "Back in your shell" on every fresh terminal. The workspace now answers
+/// the question itself, and its answer wins over the snapshot.
+#[test]
+fn a_terminal_the_workspace_says_it_created_is_not_a_reattach() {
+    let (session, _) = open_against(
+        TerminalKind::Shell,
+        open_snapshot(json!({ "status": "running", "pid": 4_242, "created": true })),
+        None,
+        None,
+    );
+    assert!(!session.reattached);
+}
+
+#[test]
+fn a_terminal_the_workspace_found_running_is_a_reattach() {
+    let (session, _) = open_against(
+        TerminalKind::Shell,
+        open_snapshot(json!({ "status": "running", "pid": 4_242, "created": false })),
+        None,
+        None,
+    );
+    assert!(session.reattached);
+}
+
+/// A provider terminal has no local pid at all — its process is in the runner
+/// container — so the old guess degraded to "running at all", which is true of
+/// every Claude terminal the moment it starts.
+#[test]
+fn a_fresh_claude_terminal_is_not_greeted_as_one_you_were_already_in() {
+    let (session, _) = open_against(
+        TerminalKind::Claude,
+        open_snapshot(json!({ "status": "running", "pid": null, "created": true })),
+        None,
+        None,
+    );
+    assert!(!session.reattached);
+}
+
+/// Pinned deliberately. Against a workspace image that predates `created`,
+/// reading the missing field as "not reattached" would tell a person their
+/// long-running session is a new one, which is the worse of the two errors.
+#[test]
+fn a_workspace_without_created_falls_back_to_the_old_guess() {
+    let (shell_session, _) = open_against(
+        TerminalKind::Shell,
+        open_snapshot(json!({ "status": "running", "pid": 4_242 })),
+        None,
+        None,
+    );
+    assert!(shell_session.reattached);
+
+    let (fresh, _) = open_against(
+        TerminalKind::Shell,
+        open_snapshot(json!({ "status": "starting", "pid": null })),
+        None,
+        None,
+    );
+    assert!(!fresh.reattached);
+
+    let (claude, _) = open_against(
+        TerminalKind::Claude,
+        open_snapshot(json!({ "status": "running", "pid": null })),
+        None,
+        None,
+    );
+    assert!(claude.reattached);
+}
+
+/// `TERM` names a terminfo entry; `COLORTERM` is the separate signal that says
+/// truecolour really renders here. Without it an agent TUI on the far side
+/// quietly downgrades to 256 colours.
+#[test]
+fn the_open_call_carries_this_terminals_colour_capability() {
+    let (session, sent) = open_against(
+        TerminalKind::Shell,
+        open_snapshot(json!({})),
+        Some("xterm-ghostty"),
+        Some("truecolor"),
+    );
+    let open = sent.iter().find(|frame| frame["tag"] == "terminal.open").expect("the open frame");
+    assert_eq!(open["payload"]["term"], json!("xterm-ghostty"));
+    assert_eq!(open["payload"]["colorterm"], json!("truecolor"));
+    assert_eq!(session.colorterm.as_deref(), Some("truecolor"));
+}
+
+#[test]
+fn a_terminal_with_no_colour_capability_sends_no_key_at_all() {
+    let (session, sent) = open_against(TerminalKind::Shell, open_snapshot(json!({})), None, None);
+    let open = sent.iter().find(|frame| frame["tag"] == "terminal.open").expect("the open frame");
+    // Not an explicit null: the workspace must not be told about a capability
+    // nobody reported, and it has no default to fall back to either.
+    assert!(open["payload"].get("colorterm").is_none());
+    assert!(open["payload"].get("term").is_none());
+    assert_eq!(session.colorterm, None);
+}
+
 #[test]
 fn a_reattached_shell_is_recognised_by_its_running_pid() {
     let fixture = fixture("shell.json");
@@ -654,6 +815,7 @@ fn a_reattached_shell_is_recognised_by_its_running_pid() {
             environment_id: fixture["environmentId"].as_str().unwrap(),
             size: normalize_size(Some(120), Some(40)),
             term: None,
+            colorterm: None,
         },
     )
     .unwrap();
@@ -703,6 +865,7 @@ fn a_terminal_that_could_not_start_says_what_the_workspace_said() {
             environment_id: "env-primary",
             size: normalize_size(Some(80), Some(24)),
             term: None,
+            colorterm: None,
         },
     )
     .unwrap_err();
@@ -754,6 +917,7 @@ fn a_namespace_refusal_is_told_apart_from_every_other_failure() {
             environment_id: "env",
             size: normalize_size(Some(80), Some(24)),
             term: None,
+            colorterm: None,
         },
     )
     .unwrap_err();
