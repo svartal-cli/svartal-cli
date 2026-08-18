@@ -476,6 +476,80 @@ fn open_detached_terminal(
     Ok(())
 }
 
+/// What `sv add` was asked to do. One command with three outputs, because they
+/// are three steps of one job: read the runbook, then hand the token over the
+/// way the runbook says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddMode {
+    /// The runbook, for a person.
+    Runbook,
+    /// The runbook's facts, for a script. Never the token.
+    Json,
+    /// The access token on stdout and nothing else, so it can be piped
+    /// straight into `ssh newbox 'brok link … --token-stdin'`.
+    PrintToken,
+    /// The access token in a `0600` file, for a person who has to copy it.
+    TokenFile(String),
+}
+
+/// `sv add` — how a new machine joins, and the safe ways to give it the one
+/// secret it needs.
+///
+/// Every mode asks for the current session first, even the ones that print no
+/// token. A runbook written from an expired credential would send someone
+/// through an install for a link that was going to fail, and the check costs
+/// one already-cached round trip.
+pub fn add(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    mode: AddMode,
+    origin: Option<&str>,
+    publish_only: bool,
+    stdout_is_terminal: bool,
+) -> Result<(), CliError> {
+    let origin = origin.map(str::trim).unwrap_or(crate::add::DEFAULT_ORIGIN).to_string();
+    if !crate::add::is_loopback_origin(&origin) {
+        return Err(CliError(format!(
+            "{origin} is not a loopback origin, and `brok link` would refuse it. Use something like {}.",
+            crate::add::DEFAULT_ORIGIN
+        )));
+    }
+    let session = context.current_session()?;
+    let plan = crate::add::MachinePlan {
+        relay_url: context.config.relay_url.clone(),
+        issuer: context.config.issuer.clone(),
+        subject: session.user.sub.clone(),
+        origin,
+        publish_only,
+        token_expires_in_seconds: (session.access_expires_at_epoch_ms - (context.now)()) / 1_000,
+    };
+
+    match mode {
+        AddMode::Runbook => {
+            writeln!(out, "{}", crate::add::runbook(&plan)).ok();
+        }
+        AddMode::Json => {
+            writeln!(out, "{}", crate::add::runbook_json(&plan)).ok();
+        }
+        AddMode::PrintToken => {
+            // The one place this CLI writes a secret to stdout, so it is also
+            // the one place it checks where stdout goes.
+            if stdout_is_terminal {
+                return Err(CliError(crate::add::PRINT_TOKEN_ON_TERMINAL.to_string()));
+            }
+            out.write_all(&crate::add::token_file_body(&session.access_token)).ok();
+        }
+        AddMode::TokenFile(path) => {
+            let path = std::path::PathBuf::from(&path);
+            crate::fsutil::write_private_file(&path, &crate::add::token_file_body(&session.access_token))
+                .map_err(CliError::of)?;
+            writeln!(out, "{}", crate::add::token_file_note(&path.display().to_string(), &plan))
+                .ok();
+        }
+    }
+    Ok(())
+}
+
 pub fn sessions(
     context: &Context<'_>,
     out: &mut dyn Write,

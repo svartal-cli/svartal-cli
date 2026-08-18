@@ -26,6 +26,7 @@ Commands:
   whoami             Show who this terminal is signed in as.
   machines           List the machines and workspaces you can reach.
   envs               List your environments, with their short names.
+  add                Show how to connect a new machine, and hand it a token.
   name [name] [env]  Name an environment, or list the names you have given.
   sessions [machine] List agent sessions on a machine.
   shell <target>     Open a shell in a workspace you can reach.
@@ -35,11 +36,17 @@ A target is a short name, a workspace id, a workspace name, or a machine name.
 
 Options:
   --json             Emit JSON instead of a table (whoami, machines, envs,
-                     sessions).
+                     sessions, add).
   --no-browser       Print the sign-in URL instead of opening a browser (login).
   --remove <name>    Forget a short name (name).
   --terminal-id <id> Open a second, separate terminal on the same workspace
                      (shell, claude).
+  --origin <url>     The loopback origin the new box's environment server
+                     listens on (add). Default http://127.0.0.1:3773.
+  --publish-only     Write the runbook for a box with no managed tunnel (add).
+  --print-token      Write only a Svartal access token to stdout, to pipe into
+                     the new box (add). Refused when stdout is a terminal.
+  --token-file <p>   Write that token to a 0600 file instead (add).
   -h, --help         Show this message.
   -V, --version      Show the version.
 ";
@@ -85,6 +92,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
         "login" => &["--no-browser"],
         "shell" | "claude" => &["--terminal-id"],
         "name" => &["--remove"],
+        "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
         "whoami" | "machines" | "envs" | "sessions" => &["--json"],
         _ => &[],
     };
@@ -92,6 +100,10 @@ fn run(arguments: &[String]) -> Result<(), String> {
     let mut no_browser = false;
     let mut terminal_id: Option<String> = None;
     let mut removed_name: Option<String> = None;
+    let mut origin: Option<String> = None;
+    let mut publish_only = false;
+    let mut print_token = false;
+    let mut token_file: Option<String> = None;
     let mut positional: Vec<&str> = Vec::new();
     // `sv` with nothing after it has no argument list to walk, not even an
     // empty one: the command itself is the missing element.
@@ -118,6 +130,22 @@ fn run(arguments: &[String]) -> Result<(), String> {
                 removed_name = Some(
                     rest.next()
                         .ok_or_else(|| "--remove needs a name.".to_string())?
+                        .clone(),
+                );
+            }
+            "--origin" => {
+                origin = Some(
+                    rest.next()
+                        .ok_or_else(|| "--origin needs a URL.".to_string())?
+                        .clone(),
+                );
+            }
+            "--publish-only" => publish_only = true,
+            "--print-token" => print_token = true,
+            "--token-file" => {
+                token_file = Some(
+                    rest.next()
+                        .ok_or_else(|| "--token-file needs a path.".to_string())?
                         .clone(),
                 );
             }
@@ -155,6 +183,26 @@ fn run(arguments: &[String]) -> Result<(), String> {
                 ));
             }
         },
+        "add" => {
+            // The two token modes are one decision, so asking for both is a
+            // question this program cannot answer rather than a preference to
+            // resolve.
+            let mode = match (print_token, token_file.clone()) {
+                (true, Some(_)) => return Err(svartal::add::BOTH_TOKEN_MODES.to_string()),
+                (true, None) => commands::AddMode::PrintToken,
+                (false, Some(path)) => commands::AddMode::TokenFile(path),
+                (false, None) if json => commands::AddMode::Json,
+                (false, None) => commands::AddMode::Runbook,
+            };
+            commands::add(
+                &context,
+                &mut stdout,
+                mode,
+                origin.as_deref(),
+                publish_only,
+                svartal::terminal::stdout_is_terminal(),
+            )
+        }
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
         "shell" => {
             let Some(target) = positional.first().copied() else {

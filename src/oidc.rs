@@ -166,6 +166,10 @@ pub struct Authorization {
 pub struct Session {
     pub access_token: String,
     pub user: StoredUser,
+    /// `ID-18`: the effective expiry already stored, not `expires_in`. Carried
+    /// on the session because a command that hands the access token to another
+    /// machine (`sv add`) has to say how long it is worth anything.
+    pub access_expires_at_epoch_ms: i64,
 }
 
 struct ExchangeOptions<'a> {
@@ -792,7 +796,11 @@ impl<'a> OidcClient<'a> {
 }
 
 fn session_of(tokens: &StoredTokens) -> Session {
-    Session { access_token: tokens.access_token.clone(), user: tokens.user.clone() }
+    Session {
+        access_token: tokens.access_token.clone(),
+        user: tokens.user.clone(),
+        access_expires_at_epoch_ms: tokens.access_expires_at_epoch_ms,
+    }
 }
 
 fn user_of(id_token: &Jwt) -> StoredUser {

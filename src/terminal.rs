@@ -52,6 +52,17 @@ pub fn is_interactive() -> bool {
     unsafe { libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1 }
 }
 
+/// Whether stdout goes to a terminal rather than a pipe or a file.
+///
+/// Separate from `is_interactive` on purpose. That answers "can this program
+/// take over the terminal", which needs both ends; this answers "would writing
+/// this land on a screen", which is only about where stdout goes. `sv add
+/// --print-token` asks the second question.
+pub fn stdout_is_terminal() -> bool {
+    // SAFETY: `isatty` only reads the descriptor's kind.
+    unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
+}
+
 /// The current window size, from the terminal itself.
 pub fn terminal_size() -> TerminalSize {
     let mut window: libc::winsize = unsafe { std::mem::zeroed() };
