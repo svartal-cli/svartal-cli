@@ -39,6 +39,12 @@ pub const ORCHESTRATION_READ_SCOPE: &str = "orchestration:read";
 /// them. Both are load-bearing; see `ORCHESTRATION_READ_SCOPE`.
 pub const SHELL_SCOPES: [&str; 2] = [TERMINAL_OPERATE_SCOPE, ORCHESTRATION_READ_SCOPE];
 
+/// The one scope `sv close` asks for. Closing never reads the workspace
+/// config — there is no cwd to learn — so `orchestration:read` stays out of
+/// the token: every terminal call, the metadata read included, is gated on
+/// `terminal:operate` alone.
+pub const CLOSE_SCOPES: [&str; 1] = [TERMINAL_OPERATE_SCOPE];
+
 #[derive(Debug)]
 pub enum WorkspaceError {
     /// The workspace refused the terminal scope while handing out the access

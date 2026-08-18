@@ -27,6 +27,7 @@ the source comments (`ID-9`, `ID-16`, `ID-25`, …) are that document's.
 | `sessions [machine]`| partial            | partial     | lists reachable workspaces; live agent sessions are not readable with a terminal sign-in yet |
 | `shell <target>`    | yes                | yes         | full connect chain, detached terminal namespace, raw-mode byte pump, reattach; `--terminal-id` too |
 | `claude [target]`   | yes                | yes         | the same client in the `svartal-claude:` namespace; the workspace runs Claude inside the machine broker's runner container. The target may be omitted when only one workspace is reachable |
+| `close shell\|claude` | no               | yes         | **this binary only**, for now. Ends the detached terminal instead of detaching from it, and says when nothing was running; `--terminal-id` too. The sentences are the contract the npm CLI will copy |
 | `envs`              | yes                | yes         | The same join `machines` prints, workspace by workspace, with a SHORTNAME column; `--json` too |
 | `add`               | no                 | yes         | **this binary only.** How to connect a new machine, and the two safe ways to hand it a token. `--json`, `--origin`, `--publish-only`, `--print-token`, `--token-file` |
 | `name`              | yes                | yes         | Give a workspace a short word to type; `--remove` forgets one. Both CLIs read and write the same file |
@@ -83,6 +84,7 @@ sv add              # how to connect a new machine, and how to hand it a token
 sv name web 9b4eab… # call that workspace `web` from now on
 sv shell web        # a short name, a workspace id, a workspace name, a machine
 sv claude web       # an interactive Claude terminal in that workspace
+sv close shell web  # end that shell instead of leaving it running
 sv machines
 sv sessions workbench
 sv logout
@@ -162,7 +164,10 @@ above except `--origin` becomes unnecessary.
 is derived from the workspace id, so running it again from anywhere lands in
 the same shell; `--terminal-id <id>` opens a second, separate one. Quitting the
 CLI **detaches** — the remote shell keeps running, and the closing line says so.
-Ending it is an explicit `exit` or Ctrl-D.
+Ending it is an explicit act: `exit` or Ctrl-D from inside, or `sv close shell
+<target>` from anywhere, without attaching. `close` kills only the one terminal
+it names, and closing a terminal that is not running is an answer, not an
+error: `No shell was running on <workspace>.`, exit 0.
 
 Whether that opening line says "back in your shell" or names a new one is the
 workspace's answer, not a guess: `terminal.open` reports `created`, because it
@@ -181,7 +186,8 @@ makes programs print escape sequences as text, which is worse than the
 
 `sv claude` is the same command against the sibling namespace
 `svartal-claude:<subject>`, so everything above holds: same connect chain, same
-reattach, same detach-on-quit, `--terminal-id` for a second one. What differs is
+reattach, same detach-on-quit, `--terminal-id` for a second one, `sv close
+claude` to end it. What differs is
 what the workspace starts behind it — Claude's own CLI, running inside the
 machine broker's runner container, because a brokered credential may not leave
 it. The workspace needs a brokered Claude credential for the signed-in account;

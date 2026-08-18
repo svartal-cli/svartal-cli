@@ -293,6 +293,7 @@ fn the_connect_chain_makes_the_same_four_requests_as_the_reference() {
             target: &target,
             dpop_key: &key,
             client_metadata: shell::cli_client_metadata(),
+            scopes: &svartal::workspace::SHELL_SCOPES,
         },
     )
     .unwrap();
@@ -380,6 +381,7 @@ fn the_workspace_token_asks_for_both_scopes() {
             target: &target,
             dpop_key: &key,
             client_metadata: shell::cli_client_metadata(),
+            scopes: &svartal::workspace::SHELL_SCOPES,
         },
     )
     .unwrap();
@@ -448,6 +450,7 @@ fn a_grant_without_terminals_says_so_in_its_own_words() {
             target: &target,
             dpop_key: &fixture_key,
             client_metadata: shell::cli_client_metadata(),
+            scopes: &svartal::workspace::SHELL_SCOPES,
         },
     )
     .unwrap_err();
@@ -948,6 +951,191 @@ fn every_way_a_shell_ends_has_its_own_sentence() {
         describe_shell_outcome(TerminalKind::Shell, &ShellOutcome::Detached, "Primary"),
         "Left the shell on Primary running. Run the same command to pick it up again."
     );
+}
+
+// -- closing from outside ---------------------------------------------------
+
+/// The metadata snapshot chunk `sv close` reads first. `terminals` carries the
+/// sessions the workspace has live; the close is only sent when the asked-for
+/// one is among them.
+fn metadata_snapshot(terminals: &[(&str, &str)]) -> Value {
+    json!({
+        "_tag": "Chunk",
+        "requestId": "0",
+        "values": [{
+            "type": "snapshot",
+            "terminals": terminals
+                .iter()
+                .map(|(thread_id, terminal_id)| json!({
+                    "threadId": thread_id,
+                    "terminalId": terminal_id,
+                    "cwd": "/workspace",
+                    "worktreePath": null,
+                    "status": "running",
+                    "pid": 4_242,
+                    "exitCode": null,
+                    "exitSignal": null,
+                    "hasRunningSubprocess": false,
+                    "label": "shell",
+                    "updatedAt": "2026-08-18T12:00:00.000Z",
+                }))
+                .collect::<Vec<_>>(),
+        }],
+    })
+}
+
+fn close_success() -> Value {
+    // `WsTerminalCloseRpc` declares no success schema; the workspace answers
+    // with an empty exit either way. The probe is what tells the two apart.
+    json!({
+        "_tag": "Exit",
+        "requestId": "1",
+        "exit": { "_tag": "Success", "value": null },
+    })
+}
+
+fn run_close(
+    kind: TerminalKind,
+    terminal_id_override: Option<&str>,
+    server_frames: &[Value],
+    release_after: Vec<usize>,
+) -> (Result<shell::CloseOutcome, shell::ShellError>, Vec<Value>) {
+    let transport = ScriptedTransport::new(server_frames, release_after);
+    let mut rpc = RpcClient::new(transport);
+    let outcome = shell::close_shell(
+        &mut rpc,
+        &shell::CloseInput {
+            kind,
+            label: "Primary",
+            subject: "user-1",
+            terminal_id: terminal_id_override,
+            environment_id: "env-primary",
+        },
+    );
+    let frames = rpc.transport_mut().outgoing.clone();
+    (outcome, frames)
+}
+
+#[test]
+fn close_reads_the_snapshot_acks_it_and_sends_the_exact_close_frame() {
+    let (outcome, frames) = run_close(
+        TerminalKind::Shell,
+        None,
+        &[
+            metadata_snapshot(&[("svartal-shell:user-1", "shell-env-primary")]),
+            close_success(),
+        ],
+        // The snapshot once the subscription is out; the close's exit once the
+        // close request is out (request, ack, interrupt, close).
+        vec![1, 4],
+    );
+    assert_eq!(outcome.unwrap(), shell::CloseOutcome::Closed);
+    assert_eq!(
+        frames,
+        vec![
+            json!({"_tag": "Request", "id": "0", "tag": "subscribeTerminalMetadata", "payload": {}, "headers": []}),
+            json!({"_tag": "Ack", "requestId": "0"}),
+            json!({"_tag": "Interrupt", "requestId": "0"}),
+            json!({"_tag": "Request", "id": "1", "tag": "terminal.close", "payload": {"threadId": "svartal-shell:user-1", "terminalId": "shell-env-primary"}, "headers": []}),
+        ]
+    );
+}
+
+#[test]
+fn a_claude_close_names_the_claude_namespace_and_id() {
+    let (outcome, frames) = run_close(
+        TerminalKind::Claude,
+        None,
+        &[
+            metadata_snapshot(&[
+                // The person's shell on the same workspace is not what
+                // `sv close claude` was asked about.
+                ("svartal-shell:user-1", "shell-env-primary"),
+                ("svartal-claude:user-1", "claude-env-primary"),
+            ]),
+            close_success(),
+        ],
+        vec![1, 4],
+    );
+    assert_eq!(outcome.unwrap(), shell::CloseOutcome::Closed);
+    assert_eq!(
+        frames[3],
+        json!({"_tag": "Request", "id": "1", "tag": "terminal.close", "payload": {"threadId": "svartal-claude:user-1", "terminalId": "claude-env-primary"}, "headers": []}),
+    );
+}
+
+#[test]
+fn a_terminal_that_is_not_in_the_snapshot_gets_no_close_call_at_all() {
+    // The other kind's terminal is there; the asked-for one is not. Nothing
+    // is sent that could tear anything down.
+    let (outcome, frames) = run_close(
+        TerminalKind::Claude,
+        None,
+        &[metadata_snapshot(&[("svartal-shell:user-1", "shell-env-primary")])],
+        vec![1],
+    );
+    assert_eq!(outcome.unwrap(), shell::CloseOutcome::NothingRunning);
+    assert_eq!(
+        frames,
+        vec![
+            json!({"_tag": "Request", "id": "0", "tag": "subscribeTerminalMetadata", "payload": {}, "headers": []}),
+            json!({"_tag": "Ack", "requestId": "0"}),
+            json!({"_tag": "Interrupt", "requestId": "0"}),
+        ]
+    );
+}
+
+#[test]
+fn a_terminal_id_override_is_the_id_the_close_names() {
+    let (outcome, frames) = run_close(
+        TerminalKind::Shell,
+        Some("shell-second"),
+        &[
+            metadata_snapshot(&[
+                ("svartal-shell:user-1", "shell-env-primary"),
+                ("svartal-shell:user-1", "shell-second"),
+            ]),
+            close_success(),
+        ],
+        vec![1, 4],
+    );
+    assert_eq!(outcome.unwrap(), shell::CloseOutcome::Closed);
+    assert_eq!(frames[3]["payload"], json!({"threadId": "svartal-shell:user-1", "terminalId": "shell-second"}));
+}
+
+#[test]
+fn every_answer_close_can_give_has_its_own_sentence() {
+    assert_eq!(
+        shell::describe_close_outcome(TerminalKind::Shell, shell::CloseOutcome::Closed, "Primary"),
+        "Closed the shell on Primary."
+    );
+    assert_eq!(
+        shell::describe_close_outcome(TerminalKind::Claude, shell::CloseOutcome::Closed, "Primary"),
+        "Closed the Claude terminal on Primary."
+    );
+    assert_eq!(
+        shell::describe_close_outcome(TerminalKind::Shell, shell::CloseOutcome::NothingRunning, "Primary"),
+        "No shell was running on Primary."
+    );
+    assert_eq!(
+        shell::describe_close_outcome(TerminalKind::Claude, shell::CloseOutcome::NothingRunning, "Primary"),
+        "No Claude terminal was running on Primary."
+    );
+}
+
+#[test]
+fn a_close_that_fails_says_close_not_open() {
+    let refused = json!({
+        "_tag": "Exit",
+        "requestId": "0",
+        "exit": {
+            "_tag": "Failure",
+            "cause": [{ "_tag": "Fail", "error": { "_tag": "SomeStreamError", "message": "the stream broke" } }],
+        },
+    });
+    let (outcome, _) = run_close(TerminalKind::Shell, None, &[refused], vec![1]);
+    let message = outcome.unwrap_err().to_string();
+    assert_eq!(message, "Could not close the shell on Primary: the stream broke");
 }
 
 // -- the local terminal ----------------------------------------------------

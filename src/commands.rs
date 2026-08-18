@@ -411,6 +411,7 @@ fn open_detached_terminal(
             target,
             dpop_key: &dpop_key,
             client_metadata: crate::shell::cli_client_metadata(),
+            scopes: &crate::workspace::SHELL_SCOPES,
         },
     )
     .map_err(CliError::of)?;
@@ -548,6 +549,85 @@ pub fn add(
                 .ok();
         }
     }
+    Ok(())
+}
+
+/// `sv close shell <target>` / `sv close claude [target]`.
+///
+/// The teardown quitting deliberately is not: `sv shell` and `sv claude`
+/// detach and leave the remote terminal running, so until this verb, ending
+/// one meant attaching first. This resolves the target exactly as the open
+/// verbs do, connects the same way, and tells the workspace to kill the PTY —
+/// no attach, no raw mode, and a plain sentence when nothing was running.
+pub fn close(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    kind: TerminalKind,
+    target: Option<&str>,
+    terminal_id: Option<&str>,
+) -> Result<(), CliError> {
+    close_with(context, out, kind, target, terminal_id, |socket_url| {
+        crate::ws::WebSocketTransport::connect(socket_url).map_err(|error| error.to_string())
+    })
+}
+
+/// `close`, with the WebSocket step injectable so a test can script the wire.
+pub fn close_with<T, F>(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    kind: TerminalKind,
+    target: Option<&str>,
+    terminal_id: Option<&str>,
+    connect: F,
+) -> Result<(), CliError>
+where
+    T: crate::rpc::RpcTransport,
+    F: FnOnce(&str) -> Result<T, String>,
+{
+    let (session, view) = load_session_and_view(context)?;
+    let target = crate::target::select_target(&view, &stored_shortnames(context), target)
+        .map_err(CliError::of)?;
+
+    let dpop_key =
+        crate::dpop::load_or_create_key(&context.config.state_directory).map_err(CliError::of)?;
+    let connection = crate::shell::connect_workspace(
+        context.http,
+        &crate::shell::ConnectInput {
+            kind,
+            relay_url: &context.config.relay_url,
+            client_id: &context.config.client_id,
+            access_token: &session.access_token,
+            target: &target,
+            dpop_key: &dpop_key,
+            client_metadata: crate::shell::cli_client_metadata(),
+            scopes: &crate::workspace::CLOSE_SCOPES,
+        },
+    )
+    .map_err(CliError::of)?;
+
+    let transport = connect(&connection.socket_url).map_err(|detail| {
+        CliError::of(crate::shell::ShellError::NotClosed {
+            kind,
+            label: target.label.clone(),
+            detail,
+        })
+    })?;
+    let mut rpc = crate::rpc::RpcClient::new(transport);
+
+    let outcome = crate::shell::close_shell(
+        &mut rpc,
+        &crate::shell::CloseInput {
+            kind,
+            label: &target.label,
+            subject: &session.user.sub,
+            terminal_id,
+            environment_id: &target.environment_id,
+        },
+    );
+    rpc.transport_mut().shutdown();
+
+    let outcome = outcome.map_err(CliError::of)?;
+    writeln!(out, "{}", crate::shell::describe_close_outcome(kind, outcome, &target.label)).ok();
     Ok(())
 }
 

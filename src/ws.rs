@@ -89,6 +89,10 @@ impl RpcTransport for WebSocketTransport {
         self.tcp_stream().map(AsRawFd::as_raw_fd)
     }
 
+    fn shutdown(&mut self) {
+        self.close();
+    }
+
     fn recv(&mut self, timeout: Duration) -> Result<Option<String>, TransportError> {
         self.set_timeouts(timeout)?;
         match self.socket.read() {

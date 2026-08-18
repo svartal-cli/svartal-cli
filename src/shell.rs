@@ -10,8 +10,8 @@
 //!
 //! * **The terminal outlives the connection.** Dropping the socket detaches;
 //!   it does not kill the PTY. That is what makes a lost link recoverable, so
-//!   ending a shell is an explicit act (`exit`, or Ctrl-D) and not a side
-//!   effect of quitting the CLI.
+//!   ending a shell is an explicit act (`exit`, Ctrl-D, or `sv close`) and not
+//!   a side effect of quitting the CLI.
 //! * **The terminal id is derived from the workspace id**, so running the
 //!   command twice against the same workspace lands in the same terminal, from
 //!   any machine the person signs in on.
@@ -24,7 +24,7 @@
 //! which is the only place a brokered credential may be used.
 
 use std::os::fd::RawFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -35,7 +35,7 @@ use crate::rpc::{Exit, Incoming, RpcClient, RpcError, RpcTransport};
 use crate::target::ShellTarget;
 use crate::terminal::TerminalSize;
 use crate::workspace::{
-    self, CLI_CLIENT_METADATA, ClientMetadata, SHELL_SCOPES, TokenExchange as WorkspaceTokenExchange,
+    self, CLI_CLIENT_METADATA, ClientMetadata, TokenExchange as WorkspaceTokenExchange,
 };
 
 /// `DETACHED_TERMINAL_THREAD_PREFIX`. A terminal is keyed by
@@ -98,6 +98,12 @@ pub const METHOD_TERMINAL_OPEN: &str = "terminal.open";
 pub const METHOD_TERMINAL_ATTACH: &str = "terminal.attach";
 pub const METHOD_TERMINAL_WRITE: &str = "terminal.write";
 pub const METHOD_TERMINAL_RESIZE: &str = "terminal.resize";
+pub const METHOD_TERMINAL_CLOSE: &str = "terminal.close";
+/// The metadata stream whose opening event is a snapshot of every live
+/// terminal. `sv close` reads that one event and hangs the stream up: it is
+/// the only way this wire can say "nothing is running", because
+/// `terminal.close` returns nothing and treats a missing terminal as a no-op.
+pub const METHOD_TERMINAL_SUBSCRIBE_METADATA: &str = "subscribeTerminalMetadata";
 
 /// Long enough for a workspace that is busy, short enough that a wedged one
 /// does not hold the terminal forever.
@@ -135,6 +141,9 @@ pub enum ShellError {
     /// a credential that is not brokered, a machine with no broker at all.
     NotStarted { kind: TerminalKind, label: String, detail: String },
     Connection { kind: TerminalKind, label: String, detail: String },
+    /// `sv close` could not finish: the metadata read or the close call itself
+    /// failed. Never the "nothing was running" case, which is an answer.
+    NotClosed { kind: TerminalKind, label: String, detail: String },
 }
 
 impl std::fmt::Display for ShellError {
@@ -154,6 +163,9 @@ impl std::fmt::Display for ShellError {
             }
             Self::Connection { kind, label, detail } => {
                 write!(f, "Could not open a {} on {label}: {detail}", kind.noun())
+            }
+            Self::NotClosed { kind, label, detail } => {
+                write!(f, "Could not close the {} on {label}: {detail}", kind.noun())
             }
         }
     }
@@ -181,6 +193,25 @@ fn terminal_call_error(
         };
     }
     connection_error(kind, label, error)
+}
+
+/// `terminal_call_error`, for the close path: the namespace guard keeps its
+/// sentence, everything else says "could not close" rather than "could not
+/// open".
+fn close_call_error(
+    error: &RpcError,
+    kind: TerminalKind,
+    label: &str,
+    subject: &str,
+) -> ShellError {
+    if error.tag() == Some("EnvironmentAuthorizationError") {
+        return ShellError::Namespace {
+            kind,
+            label: label.to_string(),
+            subject: subject.to_string(),
+        };
+    }
+    ShellError::NotClosed { kind, label: label.to_string(), detail: error.to_string() }
 }
 
 /// The terminal id `sv shell <target>` and `sv claude <target>` use.
@@ -230,6 +261,10 @@ pub struct ConnectInput<'a> {
     pub target: &'a ShellTarget,
     pub dpop_key: &'a DpopKey,
     pub client_metadata: ClientMetadata,
+    /// What the workspace access token must cover: `SHELL_SCOPES` to open a
+    /// terminal, `CLOSE_SCOPES` to end one. Asked for here so a command never
+    /// holds a scope it makes no call under.
+    pub scopes: &'a [&'a str],
 }
 
 #[derive(Debug, Clone)]
@@ -301,7 +336,7 @@ pub fn connect_workspace(
             http_base_url: &http_base_url,
             label,
             credential: &connection.credential,
-            scopes: &SHELL_SCOPES,
+            scopes: input.scopes,
             dpop_proof: &proof(&token_url, None)?,
             client_metadata: input.client_metadata,
         },
@@ -567,6 +602,129 @@ pub fn describe_shell_outcome(kind: TerminalKind, outcome: &ShellOutcome, label:
         ShellOutcome::Closed => format!("{title} on {label} was closed."),
         ShellOutcome::Detached => {
             format!("Left the {noun} on {label} running. Run the same command to pick it up again.")
+        }
+    }
+}
+
+// -- closing from outside --------------------------------------------------
+
+/// What `sv close` found on the workspace. Both are answers, not failures:
+/// asking to end a terminal that is not running deserves a sentence, not a
+/// stack of refusals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseOutcome {
+    Closed,
+    NothingRunning,
+}
+
+/// The line `sv close` prints, one sentence per answer the wire can give.
+pub fn describe_close_outcome(kind: TerminalKind, outcome: CloseOutcome, label: &str) -> String {
+    let noun = kind.noun();
+    match outcome {
+        CloseOutcome::Closed => format!("Closed the {noun} on {label}."),
+        CloseOutcome::NothingRunning => format!("No {noun} was running on {label}."),
+    }
+}
+
+pub struct CloseInput<'a> {
+    pub kind: TerminalKind,
+    pub label: &'a str,
+    /// The verified subject; the namespace this person's terminals live in.
+    pub subject: &'a str,
+    pub terminal_id: Option<&'a str>,
+    pub environment_id: &'a str,
+}
+
+/// End this person's terminal on the workspace, or learn that none is running.
+///
+/// `terminal.close` answers the same nothing whether it killed a PTY or found
+/// no session — the workspace treats a missing terminal as a no-op — so the
+/// call alone cannot say which sentence the person should read. The metadata
+/// stream can: its opening event is a snapshot of every live terminal. So:
+/// read that snapshot, hang the stream up, and send the close only for a
+/// terminal that is there. The `terminalId` is always sent, because a close
+/// without one ends every terminal in the thread, and this command was asked
+/// about one.
+pub fn close_shell<T: RpcTransport>(
+    rpc: &mut RpcClient<T>,
+    input: &CloseInput<'_>,
+) -> Result<CloseOutcome, ShellError> {
+    let kind = input.kind;
+    let terminal_id = input
+        .terminal_id
+        .map(str::to_string)
+        .unwrap_or_else(|| terminal_id(kind, input.environment_id));
+    let thread_id = detached_thread_id(kind, input.subject);
+
+    if !terminal_is_running(rpc, input, &thread_id, &terminal_id)? {
+        return Ok(CloseOutcome::NothingRunning);
+    }
+
+    rpc.call(
+        METHOD_TERMINAL_CLOSE,
+        json!({ "threadId": thread_id, "terminalId": terminal_id }),
+        CALL_TIMEOUT,
+    )
+    .map_err(|error| close_call_error(&error, kind, input.label, input.subject))?;
+    Ok(CloseOutcome::Closed)
+}
+
+/// Whether `(thread_id, terminal_id)` is in the metadata stream's opening
+/// snapshot: subscribe, read the one event, interrupt the stream.
+fn terminal_is_running<T: RpcTransport>(
+    rpc: &mut RpcClient<T>,
+    input: &CloseInput<'_>,
+    thread_id: &str,
+    terminal_id: &str,
+) -> Result<bool, ShellError> {
+    let kind = input.kind;
+    let fail = |error: &RpcError| close_call_error(error, kind, input.label, input.subject);
+    let subscription =
+        rpc.request(METHOD_TERMINAL_SUBSCRIBE_METADATA, json!({})).map_err(|error| fail(&error))?;
+    let deadline = Instant::now() + CALL_TIMEOUT;
+    loop {
+        if Instant::now() >= deadline {
+            let _ = rpc.interrupt(&subscription);
+            return Err(fail(&RpcError::Timeout));
+        }
+        for message in rpc.pump(Duration::from_millis(100)).map_err(|error| fail(&error))? {
+            match message {
+                Incoming::Chunk { ref request_id, ref values } if *request_id == subscription => {
+                    let Some(snapshot) = values
+                        .iter()
+                        .find(|event| event.get("type").and_then(Value::as_str) == Some("snapshot"))
+                    else {
+                        continue;
+                    };
+                    let running = snapshot
+                        .get("terminals")
+                        .and_then(Value::as_array)
+                        .is_some_and(|terminals| {
+                            terminals.iter().any(|terminal| {
+                                terminal.get("threadId").and_then(Value::as_str) == Some(thread_id)
+                                    && terminal.get("terminalId").and_then(Value::as_str)
+                                        == Some(terminal_id)
+                            })
+                        });
+                    let _ = rpc.interrupt(&subscription);
+                    return Ok(running);
+                }
+                Incoming::Exit { ref request_id, ref exit } if *request_id == subscription => {
+                    // The stream ended before its snapshot. Whatever the cause
+                    // carries is the reason; a clean end with no snapshot has
+                    // no reason to give.
+                    let error = match exit {
+                        Exit::Failure(cause) => RpcError::Failed(first_error(cause)),
+                        Exit::Success(_) => RpcError::Transport(
+                            "the workspace ended the terminal listing before sending it."
+                                .to_string(),
+                        ),
+                    };
+                    return Err(fail(&error));
+                }
+                Incoming::Defect(defect) => return Err(fail(&RpcError::Defect(defect))),
+                _ => {}
+            }
         }
     }
 }
