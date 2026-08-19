@@ -1,3 +1,10 @@
+// FROZEN: the TypeScript reference CLI this generator drives was retired from
+// ivaldi main (commit 04919762a, "Retire @svartal/cli as a command"), so
+// ssh.json is a frozen recorded contract, not a regenerable one. To regenerate,
+// check out an ivaldi commit that still carries packages/svartal-cli/src
+// (knit/ssh-editor-bridge pre-merge) — the same discipline as brok's frozen
+// reference fixtures.
+//
 // Generates the ssh-bridge fixture by driving the REAL TypeScript ssh-proxy
 // (`ivaldi/packages/svartal-cli/src/sshProxy.ts` on `@svartal/client/remote`)
 // against a stubbed relay, a stubbed workspace and a WebSocket double, and
