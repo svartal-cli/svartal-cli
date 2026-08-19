@@ -395,7 +395,7 @@ fn the_workspace_token_asks_for_both_scopes() {
     assert_eq!(value("scope"), "terminal:operate orchestration:read");
     assert_eq!(value("grant_type"), "urn:ietf:params:oauth:grant-type:token-exchange");
     assert_eq!(value("subject_token"), "environment-credential");
-    assert_eq!(value("subject_token_type"), "urn:t3:params:oauth:token-type:environment-bootstrap");
+    assert_eq!(value("subject_token_type"), "urn:svartal:params:oauth:token-type:environment-bootstrap");
     assert_eq!(value("client_label"), "svartal CLI");
     assert_eq!(value("client_device_type"), "desktop");
 }

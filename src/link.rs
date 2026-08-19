@@ -8,7 +8,7 @@
 //! 1. Parse the pairing URL the environment server printed at startup
 //!    (`buildPairingUrl` in `apps/server/src/startupAccess.ts`), or the hosted
 //!    `?host=` form (`readHostedPairingRequest`).
-//! 2. `GET /.well-known/t3/environment` — who is this machine.
+//! 2. `GET /.well-known/svartal/environment` — who is this machine.
 //! 3. `POST /oauth/token` — exchange the single-use pairing token for an
 //!    environment access token. This burns the token: nothing before this
 //!    point may be repeated with the same URL.
@@ -135,7 +135,7 @@ pub struct EnvironmentDescriptor {
     pub label: String,
 }
 
-/// `GET /.well-known/t3/environment` (`EnvironmentMetadataHttpApi`). No auth:
+/// `GET /.well-known/svartal/environment` (`EnvironmentMetadataHttpApi`). No auth:
 /// this is the same discovery every client starts with.
 pub fn discover_environment(
     http: &dyn HttpTransport,
@@ -149,7 +149,7 @@ pub fn discover_environment(
     };
     let response = http
         .send(
-            Request::get(format!("{}/.well-known/t3/environment", target.http_base_url()))
+            Request::get(format!("{}/.well-known/svartal/environment", target.http_base_url()))
                 .header("accept", "application/json"),
         )
         .map_err(|_| unreachable())?;

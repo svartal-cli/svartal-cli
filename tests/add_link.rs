@@ -103,7 +103,7 @@ impl Harness {
             if url == format!("{issuer}/.well-known/jwks.json") {
                 return json_response(200, &jwks);
             }
-            if url == machine_url("/.well-known/t3/environment") {
+            if url == machine_url("/.well-known/svartal/environment") {
                 return json_response(200, &descriptor_body());
             }
             if url == machine_url("/oauth/token") {
@@ -251,7 +251,7 @@ fn add_runs_the_whole_link_flow_in_order_with_the_exact_payloads() {
     assert_eq!(
         flow.iter().map(|request| (request.method, request.url.as_str())).collect::<Vec<_>>(),
         vec![
-            ("GET", machine_url("/.well-known/t3/environment").as_str()),
+            ("GET", machine_url("/.well-known/svartal/environment").as_str()),
             ("POST", machine_url("/oauth/token").as_str()),
             ("POST", format!("{relay}/v1/client/environment-link-challenges").as_str()),
             ("POST", machine_url("/api/connect/link-proof").as_str()),
@@ -271,7 +271,7 @@ fn add_runs_the_whole_link_flow_in_order_with_the_exact_payloads() {
         vec![
             ("grant_type".to_string(), "urn:ietf:params:oauth:grant-type:token-exchange".to_string()),
             ("subject_token".to_string(), PAIRING_TOKEN.to_string()),
-            ("subject_token_type".to_string(), "urn:t3:params:oauth:token-type:environment-bootstrap".to_string()),
+            ("subject_token_type".to_string(), "urn:svartal:params:oauth:token-type:environment-bootstrap".to_string()),
             ("requested_token_type".to_string(), "urn:ietf:params:oauth:token-type:access_token".to_string()),
             ("client_label".to_string(), "svartal CLI".to_string()),
             ("client_device_type".to_string(), "desktop".to_string()),

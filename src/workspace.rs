@@ -21,7 +21,7 @@ use crate::http::{HttpTransport, Request};
 /// `AuthTokenExchangeGrantType`.
 pub const TOKEN_EXCHANGE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 /// `AuthEnvironmentBootstrapTokenType`.
-pub const BOOTSTRAP_TOKEN_TYPE: &str = "urn:t3:params:oauth:token-type:environment-bootstrap";
+pub const BOOTSTRAP_TOKEN_TYPE: &str = "urn:svartal:params:oauth:token-type:environment-bootstrap";
 /// `AuthAccessTokenType`.
 pub const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 

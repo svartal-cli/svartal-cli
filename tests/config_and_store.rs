@@ -51,7 +51,7 @@ fn the_default_configuration_is_the_hosted_one() {
     assert_eq!(config.issuer, "https://api.svartal.com");
     assert_eq!(config.api_base_url, "https://api.svartal.com");
     assert_eq!(config.relay_url, "https://relay.svartal.com");
-    assert_eq!(config.audience, "t3-code-relay");
+    assert_eq!(config.audience, "svartal-relay");
     assert_eq!(config.client_id, "svartal-cli");
     assert_eq!(config.scopes, vec!["openid", "profile", "email", "offline_access"]);
     assert_eq!(

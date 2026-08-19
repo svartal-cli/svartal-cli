@@ -219,7 +219,7 @@ Configuration is environment variables, all optional:
 | `SVARTAL_ISSUER`       | `https://api.svartal.com`   | OIDC issuer. Must be an HTTPS origin.      |
 | `SVARTAL_API_URL`      | the issuer                  | Svartal API origin, when it is split out.  |
 | `SVARTAL_RELAY_URL`    | `https://relay.svartal.com` | Relay origin.                              |
-| `SVARTAL_AUDIENCE`     | `t3-code-relay`             | Access-token audience.                     |
+| `SVARTAL_AUDIENCE`     | `svartal-relay`             | Access-token audience.                     |
 | `SVARTAL_CLIENT_ID`    | `svartal-cli`               | OIDC client id.                            |
 | `SVARTAL_REDIRECT_URI` | the two registered ones     | Only accepted if Svartal would accept it.  |
 | `SVARTAL_CONFIG_DIR`   | `$XDG_CONFIG_HOME/svartal`, else `~/.config/svartal` | Where the credential lives. |
@@ -230,13 +230,13 @@ Three files, all `0600` in a `0700` directory:
 
 | File                            | Contents                                                  |
 | ------------------------------- | --------------------------------------------------------- |
-| `t3.web.oidc.tokens.v1.json`    | the OIDC token set (`ID-20`)                              |
+| `svartal.oidc.tokens.v1.json`    | the OIDC token set (`ID-20`)                              |
 | `dpop.jwk.json`                 | the ES256 DPoP proof key                                   |
 | `shortnames.json`               | the words you gave your workspaces                        |
 
-Deleting `~/.config/svartal` removes everything this program holds. The file
-names and formats are the ones the retired npm CLI used, so a credential or a
-short name recorded by either is read by this binary unchanged.
+Deleting `~/.config/svartal` removes everything this program holds. A sign-in
+recorded under the credential file's previous name is not read; run `sv login`
+once after updating.
 
 `shortnames.json` is a flat map of name to workspace id, with no version field
 and no wrapper, so another program can read or write it without agreeing to
