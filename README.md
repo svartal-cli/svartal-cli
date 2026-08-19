@@ -169,7 +169,8 @@ workspace's answer, not a guess: `terminal.open` reports `created`, because it
 is the party that either spawned a process or found one. A freshly spawned PTY
 is reported `running` with a pid within milliseconds, so a client reading the
 snapshot cannot tell a brand-new terminal from a week-old one. Against a
-workspace that predates the field, this binary falls back to that old guess.
+workspace that predates the field, the open reads as fresh: the old snapshot
+guess only ever answered "reattached", so it protected nobody.
 
 The remote shell is told what terminal it is talking to. `TERM` is forwarded
 when it is a plain terminfo name, and `COLORTERM` when it is a plain word — both
