@@ -27,7 +27,9 @@ Commands:
   whoami             Show who this terminal is signed in as.
   machines           List the machines and workspaces you can reach.
   envs               List your environments, with their short names.
-  add                Show how to connect a new machine, and hand it a token.
+  add [pairing-url]  With a pairing URL, link that machine to your Svartal
+                     account. Without one, show how to connect a new machine,
+                     and hand it a token.
   name [name] [env]  Name an environment, or list the names you have given.
   sessions [machine] List agent sessions on a machine.
   shell <target>     Open a shell in a workspace you can reach.
@@ -188,26 +190,37 @@ fn run(arguments: &[String]) -> Result<(), String> {
                 ));
             }
         },
-        "add" => {
-            // The two token modes are one decision, so asking for both is a
-            // question this program cannot answer rather than a preference to
-            // resolve.
-            let mode = match (print_token, token_file.clone()) {
-                (true, Some(_)) => return Err(svartal::add::BOTH_TOKEN_MODES.to_string()),
-                (true, None) => commands::AddMode::PrintToken,
-                (false, Some(path)) => commands::AddMode::TokenFile(path),
-                (false, None) if json => commands::AddMode::Json,
-                (false, None) => commands::AddMode::Runbook,
-            };
-            commands::add(
-                &context,
-                &mut stdout,
-                mode,
-                origin.as_deref(),
-                publish_only,
-                svartal::terminal::stdout_is_terminal(),
-            )
-        }
+        // One verb, two modes, told apart by the argument. A pairing URL names
+        // the one machine to link, so the flow runs against it; no URL means
+        // the runbook, written for a machine that has no URL to give yet.
+        "add" => match svartal::add::route(
+            positional.first().copied(),
+            json || origin.is_some() || publish_only || print_token || token_file.is_some(),
+        )? {
+            svartal::add::AddRoute::Link(pairing_url) => {
+                commands::add_link(&context, &mut stdout, pairing_url)
+            }
+            svartal::add::AddRoute::Runbook => {
+                // The two token modes are one decision, so asking for both is a
+                // question this program cannot answer rather than a preference to
+                // resolve.
+                let mode = match (print_token, token_file.clone()) {
+                    (true, Some(_)) => return Err(svartal::add::BOTH_TOKEN_MODES.to_string()),
+                    (true, None) => commands::AddMode::PrintToken,
+                    (false, Some(path)) => commands::AddMode::TokenFile(path),
+                    (false, None) if json => commands::AddMode::Json,
+                    (false, None) => commands::AddMode::Runbook,
+                };
+                commands::add(
+                    &context,
+                    &mut stdout,
+                    mode,
+                    origin.as_deref(),
+                    publish_only,
+                    svartal::terminal::stdout_is_terminal(),
+                )
+            }
+        },
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
         "shell" => {
             let Some(target) = positional.first().copied() else {

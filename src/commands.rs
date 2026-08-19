@@ -631,6 +631,98 @@ where
     Ok(())
 }
 
+/// `sv add <pairing-url>` — link the machine this command runs on to the
+/// signed-in account, using the single-use pairing URL its environment server
+/// printed at startup.
+///
+/// The order is deliberate: everything that can fail without cost — the URL
+/// parse, the session, the discovery — happens before the token exchange,
+/// because the exchange burns the single-use token. From there the flow never
+/// re-runs an earlier step; the environment token lives in this stack frame
+/// and each later failure says the token is spent.
+pub fn add_link(context: &Context<'_>, out: &mut dyn Write, pairing_url: &str) -> Result<(), CliError> {
+    let fresh_url = "(the environment server prints a new one every time it starts)";
+    let target = crate::link::parse_pairing_url(pairing_url).map_err(CliError::of)?;
+    let session = context.current_session()?;
+    let descriptor = crate::link::discover_environment(context.http, &target).map_err(CliError::of)?;
+
+    // -- the burn: nothing above this line may run again on a retry ---------
+    let environment_token = crate::link::exchange_pairing_token(context.http, &target).map_err(CliError::of)?;
+    if !environment_token.allows_relay_write() {
+        return Err(CliError(
+            "This pairing link cannot manage the machine's relay connection: use the pairing URL the environment server prints at startup, or one minted with the Manage-relay (relay:write) scope.".to_string(),
+        ));
+    }
+
+    let spent = |what: &str, failure: crate::link::StepFailure| {
+        CliError(format!(
+            "Could not {what} ({}). The pairing token is spent now, so get a fresh pairing URL {fresh_url} and run `sv add` again.",
+            failure.0
+        ))
+    };
+    let relay_url = &context.config.relay_url;
+    let challenge = crate::link::create_link_challenge(context.http, relay_url, &session.access_token)
+        .map_err(|failure| spent("get a link challenge from the Svartal relay", failure))?;
+    let proof = crate::link::request_link_proof(
+        context.http,
+        &target,
+        &environment_token.access_token,
+        relay_url,
+        &challenge,
+    )
+    .map_err(|failure| spent("get a link proof from the machine", failure))?;
+    let linked = crate::link::link_environment(context.http, relay_url, &session.access_token, &proof)
+        .map_err(|failure| spent("record the link on the Svartal relay", failure))?;
+    if linked.environment_id != descriptor.environment_id {
+        return Err(CliError(format!(
+            "The relay answered for workspace {}, but this machine is {}. The pairing token is spent now, so get a fresh pairing URL {fresh_url} and run `sv add` again.",
+            linked.environment_id, descriptor.environment_id
+        )));
+    }
+
+    // From here the account-side link exists, so the failures stop blaming the
+    // token: a fresh one only repeats a flow that is safe to repeat.
+    let tunnel = crate::link::configure_relay(
+        context.http,
+        &target,
+        &environment_token.access_token,
+        relay_url,
+        &linked,
+    )
+    .map_err(|failure| {
+        CliError(format!(
+            "Your account is linked to {}, but the machine could not store the relay configuration ({}). Re-running `sv add` with a fresh pairing token is safe.",
+            descriptor.label, failure.0
+        ))
+    })?;
+
+    let confirmed = api::list_linked_environments(context.http, relay_url, &session.access_token)
+        .map(|links| links.iter().any(|link| link.environment_id == descriptor.environment_id));
+    if !confirmed.unwrap_or(false) {
+        return Err(CliError(format!(
+            "The machine was configured, but {} does not show in your environment list. The pairing token is spent now, so if `sv machines` still does not show it, get a fresh pairing URL {fresh_url} and run `sv add` again.",
+            descriptor.label
+        )));
+    }
+
+    writeln!(out, "Linked {} to your Svartal account.", descriptor.label).ok();
+    match tunnel {
+        crate::link::TunnelReport::Running => {}
+        crate::link::TunnelReport::NotInstalled => {
+            writeln!(
+                out,
+                "This machine's tunnel client is not installed yet; the machine will be reachable once it is."
+            )
+            .ok();
+        }
+        crate::link::TunnelReport::Unspecified => {
+            writeln!(out, "sv shell {} will reach it once its tunnel reports in.", descriptor.label)
+                .ok();
+        }
+    }
+    Ok(())
+}
+
 pub fn sessions(
     context: &Context<'_>,
     out: &mut dyn Write,
