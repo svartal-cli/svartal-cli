@@ -11,6 +11,7 @@ use svartal::browser::{BrowserOpener, NoBrowser, SystemBrowser};
 use svartal::commands::{self, Context};
 use svartal::config::{environment_from_process, resolve_config};
 use svartal::http::UreqTransport;
+use svartal::shell::TerminalKind;
 use svartal::store::FileTokenStorage;
 
 const USAGE: &str = "Work with your Svartal machines from the terminal.
@@ -31,6 +32,10 @@ Commands:
   sessions [machine] List agent sessions on a machine.
   shell <target>     Open a shell in a workspace you can reach.
   claude [target]    Open an interactive Claude terminal in a workspace.
+  close shell <target>
+                     End the shell on a workspace, without attaching to it.
+  close claude [target]
+                     End the Claude terminal on a workspace.
 
 A target is a short name, a workspace id, a workspace name, or a machine name.
 
@@ -39,8 +44,8 @@ Options:
                      sessions, add).
   --no-browser       Print the sign-in URL instead of opening a browser (login).
   --remove <name>    Forget a short name (name).
-  --terminal-id <id> Open a second, separate terminal on the same workspace
-                     (shell, claude).
+  --terminal-id <id> Open — or close — a second, separate terminal on the same
+                     workspace (shell, claude, close).
   --origin <url>     The loopback origin the new box's environment server
                      listens on (add). Default http://127.0.0.1:3773.
   --publish-only     Write the runbook for a box with no managed tunnel (add).
@@ -90,7 +95,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
     // misunderstanding worth saying out loud, not something to ignore.
     let accepted: &[&str] = match command {
         "login" => &["--no-browser"],
-        "shell" | "claude" => &["--terminal-id"],
+        "shell" | "claude" | "close" => &["--terminal-id"],
         "name" => &["--remove"],
         "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
         "whoami" | "machines" | "envs" | "sessions" => &["--json"],
@@ -220,6 +225,34 @@ fn run(arguments: &[String]) -> Result<(), String> {
             positional.first().copied(),
             terminal_id.as_deref(),
         ),
+        "close" => {
+            // The kind is a positional word mirroring the open verbs, so what
+            // `sv shell` opened, `sv close shell` closes.
+            let kind = match positional.first().copied() {
+                Some("shell") => TerminalKind::Shell,
+                Some("claude") => TerminalKind::Claude,
+                Some(other) => {
+                    return Err(format!(
+                        "`sv close {other}` is not a thing sv can close. It is `sv close shell <target>` or `sv close claude [target]`."
+                    ));
+                }
+                None => {
+                    return Err(
+                        "`sv close` needs to know which kind of terminal to close: `sv close shell <target>` or `sv close claude [target]`."
+                            .to_string(),
+                    );
+                }
+            };
+            let target = positional.get(1).copied();
+            if kind == TerminalKind::Shell && target.is_none() {
+                // The same rule as `sv shell`: a shell target is never guessed.
+                return Err(
+                    "`sv close shell` needs the machine or workspace whose shell to close. Run `sv envs` to see them."
+                        .to_string(),
+                );
+            }
+            commands::close(&context, &mut stdout, kind, target, terminal_id.as_deref())
+        }
         other => {
             return Err(format!("`{other}` is not an sv command. Run `sv --help` to see what is."));
         }

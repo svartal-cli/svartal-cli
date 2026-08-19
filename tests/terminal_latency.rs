@@ -19,12 +19,12 @@ fn serve_one_websocket() -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let port = listener.local_addr().expect("the bound address").port();
     let handle = std::thread::spawn(move || {
-        if let Ok((stream, _)) = listener.accept() {
-            if let Ok(socket) = tungstenite::accept(stream) {
-                // Hold the connection until the client is done with it.
-                std::thread::sleep(Duration::from_millis(500));
-                drop(socket);
-            }
+        if let Ok((stream, _)) = listener.accept()
+            && let Ok(socket) = tungstenite::accept(stream)
+        {
+            // Hold the connection until the client is done with it.
+            std::thread::sleep(Duration::from_millis(500));
+            drop(socket);
         }
     });
     (format!("ws://127.0.0.1:{port}/ws"), handle)

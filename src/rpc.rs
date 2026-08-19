@@ -135,6 +135,10 @@ pub trait RpcTransport {
     fn readable_fd(&self) -> Option<std::os::fd::RawFd> {
         None
     }
+
+    /// Hang up politely when the caller is done. A test transport has nothing
+    /// to hang up, so the default does nothing.
+    fn shutdown(&mut self) {}
 }
 
 /// A decoded server message.
