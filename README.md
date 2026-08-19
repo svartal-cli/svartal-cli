@@ -89,6 +89,7 @@ sv name web 9b4eab… # call that workspace `web` from now on
 sv shell web        # a short name, a workspace id, a workspace name, a machine
 sv claude web       # an interactive Claude terminal in that workspace
 sv close shell web  # end that shell instead of leaving it running
+sv ssh-setup web    # then: ssh svartal-web, or open it in a local editor
 sv machines
 sv sessions workbench
 sv logout
@@ -112,6 +113,52 @@ When a word could mean more than one thing, the order is:
 2. a short name you gave,
 3. a workspace label or a machine name — and if a word matches two of those,
    the CLI asks which rather than guessing.
+
+## Opening a workspace in a local editor
+
+`sv ssh-setup <target>` makes an ordinary `ssh svartal-<name>` reach a
+workspace, which is what every editor that does remote development rides on —
+VS Code Remote-SSH, Cursor, Zed, JetBrains Gateway, TRAMP. It mints
+`~/.config/svartal/ssh/id_ed25519` if it is not there yet (with `ssh-keygen`;
+an existing key is never regenerated) and writes a marker-guarded block to
+`~/.ssh/config`:
+
+```
+# >>> sv ssh-setup svartal-web >>>
+Host svartal-web
+  User svartal
+  ProxyCommand /usr/local/bin/sv ssh-proxy web
+  IdentityFile /home/person/.config/svartal/ssh/id_ed25519
+  IdentitiesOnly yes
+  UserKnownHostsFile /home/person/.config/svartal/ssh/known_hosts
+  StrictHostKeyChecking accept-new
+  ForwardAgent no
+# <<< sv ssh-setup svartal-web <<<
+```
+
+The word after `ssh-proxy` — and the `<name>` in the alias — is the short name
+you gave that workspace, or its workspace id when you have not given one. `ssh`
+hands that word straight back to `sv ssh-proxy` with nothing else beside it, so
+it has to be one that resolves on its own; a workspace label like `My Box` does
+not survive the trip. Name the workspace first (`sv name web Primary`) if you
+want the readable host in the block above.
+
+Running it again replaces that block and nothing around it. `--print` prints
+the block instead of writing it, for someone who keeps their ssh config under
+version control, and `--reset-hosts` forgets the workspace host key recorded
+for that host first.
+
+`sv ssh-proxy <target>` is the transport the `ProxyCommand` line runs. Nobody
+types it: `ssh` does, and it carries that one connection's bytes over a binary
+WebSocket to the workspace, where one `sshd -i` is started for it. The protocol
+is `svartal-ssh.v1`, frozen in ivaldi's
+`packages/svartal-client/docs/ssh-bridge.md`, and three of its rules are the
+whole shape of the command — stdout carries payload bytes and nothing else,
+every diagnostic goes to stderr, and the connection's status becomes the
+process's exit status, because that is the only thing `ssh` can still read once
+the pump has started. The workspace's host key arrives on the authenticated
+channel and is written to `known_hosts` before a single byte is pumped, so
+there is no trust-on-first-use prompt.
 
 ## Adding a machine
 
@@ -233,6 +280,8 @@ Three files, all `0600` in a `0700` directory:
 | `svartal.oidc.tokens.v1.json`    | the OIDC token set (`ID-20`)                              |
 | `dpop.jwk.json`                 | the ES256 DPoP proof key                                   |
 | `shortnames.json`               | the words you gave your workspaces                        |
+| `ssh/id_ed25519`                | the ssh client key `ssh-proxy` presents (`0600`)          |
+| `ssh/known_hosts`               | the workspace host keys the bridge has handed over        |
 
 Deleting `~/.config/svartal` removes everything this program holds. A sign-in
 recorded under the credential file's previous name is not read; run `sv login`

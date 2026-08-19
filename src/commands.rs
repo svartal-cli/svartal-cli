@@ -18,6 +18,7 @@ use crate::loopback::{CALLBACK_TIMEOUT, LoopbackError, LoopbackServer};
 use crate::oidc::{OidcClient, OidcConfig, Session};
 use crate::shell::TerminalKind;
 use crate::shortnames::{self, Shortnames};
+use crate::sshproxy;
 use crate::store::TokenStorage;
 use crate::target::ShellTarget;
 use crate::view;
@@ -560,6 +561,128 @@ pub fn add(
             writeln!(out, "{}", crate::add::token_file_note(&path.display().to_string(), &plan))
                 .ok();
         }
+    }
+    Ok(())
+}
+
+/// `sv ssh-proxy <target>`: the SSH client's transport.
+///
+/// A person does not run this; `ssh` does, from the `ProxyCommand` line
+/// `sv ssh-setup` wrote. Two things follow, and both are load-bearing:
+///
+/// * **It takes no writer.** stdout is the SSH transport
+///   (`ssh-bridge.md` §8.1), so this command has no "connected to …" line, no
+///   summary and no closing sentence — the only thing that may ever reach
+///   stdout here is a `STDOUT` payload. Failures still print, on stderr,
+///   through the top level.
+/// * **It returns the exit status.** A `ProxyCommand`'s exit status is all
+///   `ssh` has left to read once the pump has started (§8.5), so `main` puts
+///   this on the process.
+pub fn ssh_proxy(context: &Context<'_>, target: &str) -> Result<i32, CliError> {
+    ssh_proxy_with(context, target, |socket_url| {
+        crate::ws::WebSocketTransport::connect(socket_url).map_err(|error| error.to_string())
+    })
+}
+
+/// `ssh_proxy`, with the WebSocket step injectable so a test can script the
+/// wire.
+pub fn ssh_proxy_with<T, F>(context: &Context<'_>, target: &str, connect: F) -> Result<i32, CliError>
+where
+    T: crate::ws::BinaryTransport,
+    F: FnOnce(&str) -> Result<T, String>,
+{
+    let (session, view) = load_session_and_view(context)?;
+    // The target is never guessed here: `ssh` has already been told which host
+    // to reach, and the argument is the resolved name that host stands for.
+    // That argument is also what the alias is built from, so `known_hosts` is
+    // keyed by the same word `ssh` looked the host up under.
+    let alias = sshproxy::host_alias(target);
+    let target = crate::target::select_shell_target(&view, &stored_shortnames(context), target)
+        .map_err(CliError::of)?;
+
+    let key = sshproxy::ensure_client_key(&context.config.state_directory).map_err(CliError::of)?;
+    let dpop_key =
+        crate::dpop::load_or_create_key(&context.config.state_directory).map_err(CliError::of)?;
+    let socket_url = sshproxy::connect_bridge(
+        context.http,
+        &sshproxy::BridgeConnectInput {
+            relay_url: &context.config.relay_url,
+            client_id: &context.config.client_id,
+            access_token: &session.access_token,
+            target: &target,
+            dpop_key: &dpop_key,
+            client_metadata: crate::shell::cli_client_metadata(),
+        },
+    )
+    .map_err(CliError::of)?;
+
+    let mut transport = connect(&socket_url).map_err(|detail| {
+        CliError::of(sshproxy::SshError::Connect { label: target.label.clone(), detail })
+    })?;
+    let known_hosts = sshproxy::known_hosts_path(&context.config.state_directory);
+    let mut stdio = sshproxy::ProcessStdio::new();
+    let outcome = sshproxy::run_ssh_proxy(
+        &mut transport,
+        &mut stdio,
+        &sshproxy::ProxyInput {
+            label: &target.label,
+            public_key: &key.public_key,
+            client_name: Some(sshproxy::CLIENT_NAME),
+            known_hosts: sshproxy::KnownHostsTarget { path: &known_hosts, alias: &alias },
+            ping_interval: sshproxy::PING_INTERVAL,
+        },
+    );
+    crate::ws::BinaryTransport::shutdown(&mut transport);
+    Ok(outcome.map_err(CliError::of)?.exit_code)
+}
+
+/// `sv ssh-setup <target>`: make `ssh svartal-<name>` work.
+///
+/// Applying is the default, because the thing a person asked for is a working
+/// host, not a block of text to paste. `--print` is the opt-out.
+///
+/// The word in the `ProxyCommand` — and in the alias built from it — is the
+/// short name recorded with `sv name` when there is one, and otherwise the
+/// workspace id. Both resolve on their own, which is the whole requirement:
+/// `ssh` hands that word straight back to `sv ssh-proxy` with nothing else, so
+/// the display name the person typed ("My Box", a label the workspace can
+/// rename underneath them) would not survive the trip.
+pub fn ssh_setup(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    environment: &crate::config::Environment,
+    target: &str,
+    print: bool,
+    reset_hosts: bool,
+) -> Result<(), CliError> {
+    let (_session, view) = load_session_and_view(context)?;
+    let shortnames = stored_shortnames(context);
+    let resolved =
+        crate::target::select_shell_target(&view, &shortnames, target).map_err(CliError::of)?;
+    let ssh_config_path = sshproxy::default_ssh_config_path(environment).map_err(CliError::of)?;
+    // The alias is built from this same word, so `known_hosts` is keyed by the
+    // host `ssh` looks up and the key recorded on `READY` is the one it checks.
+    let name = shortnames
+        .shortname_of(&resolved.environment_id)
+        .map(str::to_string)
+        .unwrap_or_else(|| resolved.environment_id.clone());
+
+    let outcome = sshproxy::run_ssh_setup(&sshproxy::SetupInput {
+        state_directory: &context.config.state_directory,
+        target: &name,
+        binary: &sshproxy::invoked_binary_path(),
+        ssh_config_path: &ssh_config_path,
+        print,
+        reset_hosts,
+    })
+    .map_err(CliError::of)?;
+
+    if print {
+        writeln!(out, "{}", outcome.block).ok();
+        return Ok(());
+    }
+    for line in sshproxy::describe_ssh_setup(&outcome) {
+        writeln!(out, "{line}").ok();
     }
     Ok(())
 }

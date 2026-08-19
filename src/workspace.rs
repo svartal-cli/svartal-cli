@@ -39,6 +39,15 @@ pub const ORCHESTRATION_READ_SCOPE: &str = "orchestration:read";
 /// them. Both are load-bearing; see `ORCHESTRATION_READ_SCOPE`.
 pub const SHELL_SCOPES: [&str; 2] = [TERMINAL_OPERATE_SCOPE, ORCHESTRATION_READ_SCOPE];
 
+/// The one scope `sv ssh-proxy` asks for.
+///
+/// `ssh-bridge.md` §2: `terminal:operate`, and only that. There is no
+/// SSH-specific scope, because `terminal:operate` already grants arbitrary
+/// command execution as the workspace account — an SSH session is a second
+/// door onto that room — and nothing on the bridge path looks a working
+/// directory up, so `orchestration:read` stays out of the token.
+pub const SSH_SCOPES: [&str; 1] = [TERMINAL_OPERATE_SCOPE];
+
 /// The one scope `sv close` asks for. Closing never reads the workspace
 /// config — there is no cwd to learn — so `orchestration:read` stays out of
 /// the token: every terminal call, the metadata read included, is gated on
@@ -220,16 +229,44 @@ pub fn issue_websocket_ticket(
 
 /// `resolveRemoteDpopWebSocketConnectionUrl`: the ws base URL, with `/ws` when
 /// it carries no path of its own, and the ticket in the query.
+///
+/// A base URL that already carries a path is left exactly as it is. The relay
+/// mints this URL as the RPC endpoint itself — `wss://<host>/ws` — rather than
+/// as a prefix, so appending anything to it asks for a route no workspace
+/// serves.
 pub fn websocket_url(ws_base_url: &str, ticket: &str) -> Result<String, WorkspaceError> {
-    let mut url = Url::parse(ws_base_url).map_err(|error| WorkspaceError::Failed {
-        label: ws_base_url.to_string(),
-        detail: format!("the workspace WebSocket URL is not a URL: {error}"),
-    })?;
+    let mut url = parse_url(ws_base_url)?;
     if url.path().is_empty() || url.path() == "/" {
         url.set_path("/ws");
     }
     url.query_pairs_mut().clear().append_pair("wsTicket", ticket);
     Ok(url.to_string())
+}
+
+/// The ssh bridge's socket URL, built from the workspace's **HTTP** base URL.
+///
+/// Deliberately not from the ws base URL: that one is the `/ws` endpoint, and
+/// `wss://<host>/ws/ssh` is not the bridge. The HTTP base URL is the workspace
+/// itself — origin, plus whatever path prefix it is published under — and every
+/// route hangs off it, so the scheme becomes a WebSocket one and the route goes
+/// on the end.
+pub fn websocket_route_url(
+    http_base_url: &str,
+    route: &str,
+    ticket: &str,
+) -> Result<String, WorkspaceError> {
+    let mut url = parse_url(&default_ws_base_url(http_base_url)?)?;
+    let prefix = url.path().trim_end_matches('/').to_string();
+    url.set_path(&format!("{prefix}{route}"));
+    url.query_pairs_mut().clear().append_pair("wsTicket", ticket);
+    Ok(url.to_string())
+}
+
+fn parse_url(value: &str) -> Result<Url, WorkspaceError> {
+    Url::parse(value).map_err(|error| WorkspaceError::Failed {
+        label: value.to_string(),
+        detail: format!("the workspace WebSocket URL is not a URL: {error}"),
+    })
 }
 
 /// The ws base URL a caller falls back to when the relay reported none:

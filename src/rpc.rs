@@ -110,12 +110,19 @@ pub fn describe_error(error: &Value) -> String {
 pub enum TransportError {
     Closed(String),
     Failed(String),
+    /// The far end broke the wire contract itself — a text message on a socket
+    /// the protocol says is binary only. Not a connection that ended: a caller
+    /// reports this as a protocol error rather than as a hang-up, because the
+    /// two mean different things to whoever reads the message.
+    Protocol(String),
 }
 
 impl std::fmt::Display for TransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Closed(detail) | Self::Failed(detail) => write!(f, "{detail}"),
+            Self::Closed(detail) | Self::Failed(detail) | Self::Protocol(detail) => {
+                write!(f, "{detail}")
+            }
         }
     }
 }
