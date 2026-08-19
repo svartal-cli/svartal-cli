@@ -8,6 +8,7 @@ mod common;
 use serde_json::{Value, json};
 
 use common::{FakeTransport, fixture, json_response};
+use svartal::http::Response;
 use svartal::api::{LinkRecord, Machine};
 use svartal::browser::NoBrowser;
 use svartal::commands::{self, Context};
@@ -233,6 +234,72 @@ impl Harness {
         let outcome = command(&context, &mut out);
         (outcome, String::from_utf8(out).unwrap(), http.urls())
     }
+
+    /// `run`, with the data plane answered by `respond` instead of the
+    /// fixtures. The identity provider still answers normally.
+    fn run_with_data_plane(
+        &self,
+        respond: impl Fn(&str) -> Option<Response> + Send + Sync + 'static,
+        command: impl FnOnce(&Context<'_>, &mut dyn std::io::Write) -> Result<(), svartal::commands::CliError>,
+    ) -> (Result<(), svartal::commands::CliError>, String, Vec<String>) {
+        let fixture = self.fixture.clone();
+        let issuer = fixture["issuer"].as_str().unwrap().to_string();
+        let http = FakeTransport::new(move |request| {
+            let url = request.url.as_str();
+            if let Some(response) = respond(url) {
+                return response;
+            }
+            if url == format!("{issuer}/.well-known/openid-configuration") {
+                return json_response(200, &fixture["discovery"]);
+            }
+            if url == format!("{issuer}/.well-known/jwks.json") {
+                return json_response(200, &fixture["jwks"]);
+            }
+            json_response(404, &json!({ "error": "unexpected" }))
+        });
+        let storage = MemoryTokenStorage::with_value(&self.fixture["storedTokens"].to_string());
+        let environment = [
+            ("HOME".to_string(), "/home/person".to_string()),
+            ("SVARTAL_ISSUER".to_string(), self.fixture["issuer"].as_str().unwrap().to_string()),
+            ("SVARTAL_RELAY_URL".to_string(), self.fixture["relayUrl"].as_str().unwrap().to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let now = self.now;
+        let clock = move || now;
+        let browser = NoBrowser;
+        let context = Context {
+            config: resolve_config(&environment).unwrap(),
+            http: &http,
+            storage: &storage,
+            browser: &browser,
+            now: &clock,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        let outcome = command(&context, &mut out);
+        (outcome, String::from_utf8(out).unwrap(), http.urls())
+    }
+}
+
+/// The two listings are independent requests, fetched concurrently. When both
+/// fail, the reported error is still the API's — the sentence the sequential
+/// fetch produced — so failing faster never changes what the person reads.
+#[test]
+fn when_both_listings_fail_the_api_error_is_the_one_reported() {
+    let harness = Harness::new();
+    let (outcome, output, urls) = harness.run_with_data_plane(
+        |url| {
+            (url.contains("/api/v1/client/machines") || url.contains("/v1/environments"))
+                .then(|| json_response(500, &json!({ "error": "boom" })))
+        },
+        |context, out| commands::machines(context, out, false),
+    );
+    let error = outcome.unwrap_err();
+    assert_eq!(error.0, "Could not list your machines.");
+    assert_eq!(output, "");
+    // Both requests were sent: neither listing waits on the other's answer.
+    assert!(urls.iter().any(|url| url.contains("/api/v1/client/machines")));
+    assert!(urls.iter().any(|url| url.contains("/v1/environments")));
 }
 
 #[test]

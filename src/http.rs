@@ -86,7 +86,10 @@ impl Response {
     }
 }
 
-pub trait HttpTransport {
+/// `Sync` because the two listings behind `machines`, `envs` and every target
+/// resolution are independent requests to different services, and fetching
+/// them concurrently needs one transport shared across two threads.
+pub trait HttpTransport: Sync {
     /// A non-2xx status is a `Response`, not an error. Only a request that
     /// never produced a status — DNS, TLS, a dropped connection — is an
     /// `HttpError`, because that is the boundary the OIDC rules in `ID-26`
