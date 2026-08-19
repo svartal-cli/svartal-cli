@@ -1,7 +1,7 @@
 //! The persisted OIDC token set (`ID-19`, `ID-20`) and the file it lives in.
 //!
 //! The file is **the same file the npm CLI uses**:
-//! `~/.config/svartal/t3.web.oidc.tokens.v1.json`, same JSON shape, same
+//! `~/.config/svartal/svartal.oidc.tokens.v1.json`, same JSON shape, same
 //! `0600` mode. Signing in with one CLI signs you in with the other, and
 //! `logout` from either ends both. That is the whole reason the storage key
 //! keeps its TypeScript name.
@@ -15,7 +15,7 @@ use crate::fsutil;
 
 /// `ID-19`: the key the reference client persists the token set under. It is
 /// the file's basename here.
-pub const TOKEN_STORAGE_KEY: &str = "t3.web.oidc.tokens.v1";
+pub const TOKEN_STORAGE_KEY: &str = "svartal.oidc.tokens.v1";
 
 /// The token set is a few kilobytes. Anything much larger is not one.
 const MAX_TOKEN_FILE_BYTES: u64 = 65_536;

@@ -30,7 +30,7 @@ const { SignJWT, exportJWK, generateKeyPair } = createRequire(
 
 const ISSUER = "https://api.example.test";
 const RELAY = "https://relay.example.test";
-const AUDIENCE = "t3-code-relay";
+const AUDIENCE = "svartal-relay";
 const CLIENT_ID = "svartal-cli";
 const SUBJECT = "11111111-2222-3333-4444-555555555555";
 const SCOPES = ["openid", "profile", "email", "offline_access"];
@@ -149,7 +149,7 @@ const fixture = {
     // Each of these is a token ID-16 requires the client to refuse.
     wrongAudience: await accessToken({ audience: "someone-else" }),
     wrongTokenUse: await accessToken({ tokenUse: "id" }),
-    wrongClientId: await accessToken({ clientId: "t3-web" }),
+    wrongClientId: await accessToken({ clientId: "another-app" }),
     wrongIssuer: await accessToken({ issuer: "https://evil.example.test" }),
     expired: await accessToken({ issuedAt: NOW_SECONDS - 4_000, expiresAt: NOW_SECONDS - 400 }),
     tooLongLived: await accessToken({ issuedAt: ISSUED_AT, expiresAt: ISSUED_AT + 4_000 }),

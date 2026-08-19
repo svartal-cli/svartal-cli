@@ -1,9 +1,8 @@
 //! Where Svartal is, who this client is, and where the credential lives.
 //!
 //! Port of `src/config.ts` in the TypeScript CLI, plus the two library
-//! functions it leans on: `isAllowedWebOidcRedirectUri`
-//! (`@svartal/client/identity`) and `normalizeSecureRelayUrl`
-//! (`@t3tools/shared/relayUrl`).
+//! functions it leaned on: `isAllowedWebOidcRedirectUri` and
+//! `normalizeSecureRelayUrl` (`@svartal/client/identity`).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -14,12 +13,12 @@ use url::Url;
 pub const DEFAULT_ISSUER: &str = "https://api.svartal.com";
 /// `DEFAULT_WEB_OIDC_AUDIENCE`. `ID-3`: this is what makes an access token
 /// usable against the relay.
-pub const DEFAULT_AUDIENCE: &str = "t3-code-relay";
+pub const DEFAULT_AUDIENCE: &str = "svartal-relay";
 /// `DEFAULT_RELAY_URL`.
 pub const DEFAULT_RELAY_URL: &str = "https://relay.svartal.com";
 
 /// `ID-1`: the terminal is its own registered client, so a terminal grant can
-/// be revoked on its own. `t3-web`, `t3-desktop` and `t3-mobile` are Ivaldi's.
+/// be revoked on its own; the web, desktop and mobile apps each have theirs.
 pub const CLIENT_ID: &str = "svartal-cli";
 
 /// `ID-4`: `openid` is required, and `offline_access` is not optional here —

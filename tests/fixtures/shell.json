@@ -36,8 +36,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://relay.example.com/v1/client/dpop-token",
-        "jti": "e0ffc3a3-eb18-4380-ad8c-f563542de995",
-        "iat": 1786909032
+        "jti": "20ef0a9c-84c3-498c-9a52-3dc4c607d690",
+        "iat": 1787155462
       },
       "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=oidc-access-token&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2F%2Frelay.example.com&scope=environment%3Aconnect&client_id=svartal-cli"
     },
@@ -49,8 +49,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://relay.example.com/v1/environments/env-fixture-0001/connect",
-        "jti": "eb1d95c7-6f96-4102-8d06-7c921e68cfd2",
-        "iat": 1786909032,
+        "jti": "2c14894f-5575-4233-b4ae-94a40946698e",
+        "iat": 1787155462,
         "ath": "-M3NHAaxswmcT56jeetLC28qdSxzQTiIKIPCCf03fkE"
       },
       "body": "{\"clientProofKeyThumbprint\":\"qE8IIskYdgrNmuk-iarrpPvJhIZ-jCOUBsJisLa6Yc0\"}"
@@ -63,10 +63,10 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://workspace.example.com/oauth/token",
-        "jti": "29e7d325-721e-4086-95da-a8c5bbee7d0c",
-        "iat": 1786909032
+        "jti": "14536c73-0b40-4f64-bf39-a34866361b6b",
+        "iat": 1787155462
       },
-      "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=environment-credential&subject_token_type=urn%3At3%3Aparams%3Aoauth%3Atoken-type%3Aenvironment-bootstrap&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&scope=terminal%3Aoperate+orchestration%3Aread&client_label=svartal+CLI&client_device_type=desktop"
+      "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=environment-credential&subject_token_type=urn%3Asvartal%3Aparams%3Aoauth%3Atoken-type%3Aenvironment-bootstrap&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&scope=terminal%3Aoperate+orchestration%3Aread&client_label=svartal+CLI&client_device_type=desktop"
     },
     {
       "url": "https://workspace.example.com/api/auth/websocket-ticket",
@@ -76,8 +76,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://workspace.example.com/api/auth/websocket-ticket",
-        "jti": "f3641d7f-3d87-4d6c-9592-c8024b24e66b",
-        "iat": 1786909032,
+        "jti": "de03af4e-0798-49e2-9c3b-74d638da962b",
+        "iat": 1787155462,
         "ath": "3mjY2PMoTuPQLl3VB1HXx7l6gT9NJLvpNDq-1ErvuUw"
       },
       "body": ""
@@ -89,8 +89,8 @@
       "id": "0",
       "tag": "server.getConfig",
       "payload": {},
-      "traceId": "ca167eeb0d97b0f23bc3fbd2a57ba0e2",
-      "spanId": "9db0703654fe3e51",
+      "traceId": "8222bfd3a467a01f4fdf33496c2c445c",
+      "spanId": "01f74ec3266789a7",
       "sampled": true,
       "headers": []
     },
@@ -106,8 +106,8 @@
         "rows": 40,
         "term": "xterm-ghostty"
       },
-      "traceId": "ca167eeb0d97b0f23bc3fbd2a57ba0e2",
-      "spanId": "ff12987052bfcfca",
+      "traceId": "8222bfd3a467a01f4fdf33496c2c445c",
+      "spanId": "3c6689ada9d4cf09",
       "sampled": true,
       "headers": []
     },
@@ -122,8 +122,8 @@
         "rows": 40,
         "term": "xterm-ghostty"
       },
-      "traceId": "4c3d94c0534d758fa34a7acd732882e6",
-      "spanId": "8d24aae31ed540ff",
+      "traceId": "bc4cb45b1bfc0c25a128d9f5064d0e2e",
+      "spanId": "6b7c670f42393aec",
       "sampled": true,
       "headers": []
     },
@@ -144,8 +144,8 @@
         "terminalId": "shell-env-fixture-0001",
         "data": "echo hello\r"
       },
-      "traceId": "4c3d94c0534d758fa34a7acd732882e6",
-      "spanId": "4b4712fa7e5ecf1a",
+      "traceId": "bc4cb45b1bfc0c25a128d9f5064d0e2e",
+      "spanId": "39dda0d135bc2628",
       "sampled": true,
       "headers": []
     },
@@ -159,8 +159,8 @@
         "cols": 100,
         "rows": 30
       },
-      "traceId": "4c3d94c0534d758fa34a7acd732882e6",
-      "spanId": "fc2f30bdaf5b72a8",
+      "traceId": "bc4cb45b1bfc0c25a128d9f5064d0e2e",
+      "spanId": "9c1ea5653304ab55",
       "sampled": true,
       "headers": []
     },
@@ -201,7 +201,7 @@
             "sessionMethods": [
               "dpop-access-token"
             ],
-            "sessionCookieName": "t3_session"
+            "sessionCookieName": "svartal_session"
           },
           "cwd": "/home/person/workspace",
           "keybindingsConfigPath": "/home/person/workspace/keybindings.json",

@@ -3,7 +3,7 @@
 //!
 //! There is no "add a machine" call to make. A machine becomes a Svartal
 //! machine by **linking itself**: it holds an Ed25519 key, signs a
-//! `t3-env-link+jwt` proof over a challenge, and posts it to
+//! `svartal-env-link+jwt` proof over a challenge, and posts it to
 //! `POST /v1/client/environment-links` (`MA-6`…`MA-11`). Both of those relay
 //! calls are authenticated with a **user** bearer, in the same endpoint group
 //! and behind the same middleware as `GET /v1/environments` — the call

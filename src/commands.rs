@@ -169,17 +169,29 @@ fn load_view(context: &Context<'_>) -> Result<view::MachinesView, CliError> {
 ///
 /// `shell` needs both, and asking the provider twice for the same session (or
 /// the API twice for the same listing) inside one command would be two round
-/// trips paid for nothing.
+/// trips paid for nothing. The two listings go to different services — the
+/// Svartal API and the relay — and neither depends on the other's answer, so
+/// they are fetched concurrently and the command waits only for the slower
+/// one. When both fail, the API's error is the one reported, which is the
+/// sentence the sequential fetch produced.
 fn load_session_and_view(
     context: &Context<'_>,
 ) -> Result<(Session, view::MachinesView), CliError> {
     let session = context.current_session()?;
-    let machines: Vec<Machine> =
-        api::list_machines(context.http, &context.config.api_base_url, &session.access_token)
-            .map_err(CliError::of)?;
-    let links: Vec<LinkRecord> =
-        api::list_linked_environments(context.http, &context.config.relay_url, &session.access_token)
-            .map_err(CliError::of)?;
+    // Only the transport crosses into the second thread; the rest of the
+    // context (storage, browser, clock) stays on this one.
+    let http = context.http;
+    let relay_url = &context.config.relay_url;
+    let access_token = &session.access_token;
+    let (machines, links) = std::thread::scope(|scope| {
+        let links =
+            scope.spawn(move || api::list_linked_environments(http, relay_url, access_token));
+        let machines =
+            api::list_machines(context.http, &context.config.api_base_url, &session.access_token);
+        (machines, links.join().expect("the relay listing thread never panics"))
+    });
+    let machines: Vec<Machine> = machines.map_err(CliError::of)?;
+    let links: Vec<LinkRecord> = links.map_err(CliError::of)?;
     Ok((session, view::build_machines_view(&machines, &links)))
 }
 

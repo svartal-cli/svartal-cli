@@ -7,70 +7,73 @@ the program that holds a refresh token and a DPoP signing key is a small
 static binary with an auditable dependency set. That is the same argument brok
 makes for the machine-side broker.
 
-The npm package [`@svartal/cli`](https://www.npmjs.com/package/@svartal/cli)
-(`ivaldi/packages/svartal-cli`) is the reference implementation. It works, it
-is in production, and this port is measured against it: same commands, same
-tables, same sentences, same exit codes, and the same credential file on disk.
+This binary is **the** Svartal CLI. It began as a port of the npm package
+[`@svartal/cli`](https://www.npmjs.com/package/@svartal/cli)
+(`ivaldi/packages/svartal-cli`), was measured against it command by command —
+same tables, same sentences, same exit codes, the same credential file on disk
+— and then overtook it: `add`, `close`, the bare-`sv` picker and the knit
+bridge were built here first and never ported back. The npm package is retired
+as a command; its final release ships no `sv` binary and points here. The
+`@svartal/client` library it grew out of stays where it is, serving the ivaldi
+app.
 
-The contract both implementations follow is
+The contract this implementation follows is
 `ivaldi/packages/svartal-client/SVARTAL-CONNECT.md`. The requirement numbers in
 the source comments (`ID-9`, `ID-16`, `ID-25`, …) are that document's.
 
-## Status
+## Commands
 
-| Command             | npm `@svartal/cli` | this binary | notes                                                                  |
-| ------------------- | ------------------ | ----------- | ---------------------------------------------------------------------- |
-| `login`             | yes                | yes         | PKCE, loopback callback on `127.0.0.1:5733` (or `:5734`), tokens verified locally against JWKS |
-| `logout`            | yes                | yes         | clears the credential first, then revokes the refresh token            |
-| `whoami`            | yes                | yes         | `--json` too                                                           |
-| `machines`          | yes                | yes         | `--json` too                                                           |
-| `sessions [machine]`| partial            | partial     | lists reachable workspaces; live agent sessions are not readable with a terminal sign-in yet |
-| `shell <target>`    | yes                | yes         | full connect chain, detached terminal namespace, raw-mode byte pump, reattach; `--terminal-id` too |
-| `claude [target]`   | yes                | yes         | the same client in the `svartal-claude:` namespace; the workspace runs Claude inside the machine broker's runner container. The target may be omitted when only one workspace is reachable |
-| `close shell\|claude` | no               | yes         | **this binary only**, for now. Ends the detached terminal instead of detaching from it, and says when nothing was running; `--terminal-id` too. The sentences are the contract the npm CLI will copy |
-| `envs`              | yes                | yes         | The same join `machines` prints, workspace by workspace, with a SHORTNAME column; `--json` too |
-| `add [pairing-url]` | no                 | yes         | **this binary first; the npm port follows.** With a pairing URL: link the machine you run it on to your account, from the single-use URL its environment server prints at startup. Without one: how to connect a new machine, and the two safe ways to hand it a token. `--json`, `--origin`, `--publish-only`, `--print-token`, `--token-file` |
-| `name`              | yes                | yes         | Give a workspace a short word to type; `--remove` forgets one. Both CLIs read and write the same file |
-| bare `sv`           | no (prints help)   | yes         | **this binary only.** On a terminal: the environment list, arrow keys, enter opens a shell. Off a terminal it prints the usage and exits 1, as before |
-
-Verified against the npm CLI on the same machine and the same credential:
-`whoami`, `whoami --json`, `machines`, `machines --json`, `sessions --json`,
-`envs`, `envs --json` and `name` produce byte-identical output, and `shell`
-prints the same lines on the same workspace (including reattach).
+| Command               | notes                                                                  |
+| --------------------- | ---------------------------------------------------------------------- |
+| `login`               | PKCE, loopback callback on `127.0.0.1:5733` (or `:5734`), tokens verified locally against JWKS |
+| `logout`              | clears the credential first, then revokes the refresh token            |
+| `whoami`              | `--json` too                                                           |
+| `machines`            | `--json` too                                                           |
+| `envs`                | The same join `machines` prints, workspace by workspace, with a SHORTNAME column; `--json` too |
+| `sessions [machine]`  | partial: lists reachable workspaces; live agent sessions are not readable with a terminal sign-in yet |
+| `shell <target>`      | full connect chain, detached terminal namespace, raw-mode byte pump, reattach; `--terminal-id` too |
+| `claude [target]`     | the same client in the `svartal-claude:` namespace; the workspace runs Claude inside the machine broker's runner container. The target may be omitted when only one workspace is reachable |
+| `close shell\|claude` | Ends the detached terminal instead of detaching from it, and says when nothing was running; `--terminal-id` too |
+| `add [pairing-url]`   | With a pairing URL: link the machine you run it on to your account, from the single-use URL its environment server prints at startup. Without one: how to connect a new machine, and the two safe ways to hand it a token. `--json`, `--origin`, `--publish-only`, `--print-token`, `--token-file` |
+| `name`                | Give a workspace a short word to type; `--remove` forgets one          |
+| bare `sv`             | On a terminal: the environment list, arrow keys, enter opens a shell. Off a terminal it prints the usage and exits 1 |
 
 `claude` has been run against a live workspace: an interactive Claude terminal
 on `svartal-test-1`, including detaching and picking the same session back up.
 It needs a machine running a brok build with the interactive-PTY capability, so
-not every deployed machine can host one; both implementations are also pinned to
-the same fixtures and the same sentences.
+not every deployed machine can host one.
 
-Known differences, all deliberate:
+Design notes that used to be listed as divergences from the npm CLI, kept
+because they still say why the code is shaped the way it is:
 
-* `add` and the bare-`sv` picker are this binary's, for now. They are additions,
-  not divergences: `machines` still prints exactly what the npm CLI prints.
-  `add` prints a runbook and moves a token — it adds no state and no endpoint,
-  so the npm CLI can adopt it whenever it wants to. The picker needs raw-mode
-  arrow-key handling, which is this binary's own terminal layer.
-* `envs` and `name` exist in both as of `@svartal/cli` 0.1.7, over the same
-  `~/.config/svartal/shortnames.json`, with the same resolution order and the
-  same output.
-* `--help` text is this binary's own. The npm CLI's help is generated by its
-  CLI framework; reproducing that layout would be copying a framework, not a
-  behaviour. The exit codes match anyway: `--help` and `--version` exit 0, no
-  command at all exits 1, an unknown command exits 1.
-* The two listings are fetched one after the other instead of concurrently.
+* The two listings behind `machines`, `envs` and target resolution go to
+  different services and neither depends on the other, so they are fetched
+  concurrently and the command waits only for the slower one. When both fail,
+  the API's error is the one reported.
 * `login` keeps the PKCE transaction in memory as a value rather than in a
   storage slot, so "consume it before validating anything" (`ID-12`) is
   enforced by the type system.
 * `shell` sends each keystroke without waiting for the workspace to acknowledge
-  the previous one. The reference awaits every write; on a terminal that is a
-  round trip per keypress, and nothing observable depends on it.
+  the previous one; awaiting every write would be a round trip per keypress,
+  and nothing observable depends on it.
+* `--help` and `--version` exit 0, no command at all exits 1, an unknown
+  command exits 1.
 
 ## Install
 
 ```sh
 cargo build --release
 install -m 755 target/release/sv /usr/local/bin/sv
+```
+
+Shell completion, offline by design — targets complete from the short names
+in `~/.config/svartal/shortnames.json`, the file `sv name` writes:
+
+```sh
+# zsh: put it on $fpath as _sv …
+install -m 644 completions/sv.zsh /usr/local/share/zsh/site-functions/_sv
+# … or source it from ~/.zshrc. bash sources its file directly:
+echo 'source /path/to/completions/sv.bash' >> ~/.bashrc
 ```
 
 ## Use
@@ -216,24 +219,24 @@ Configuration is environment variables, all optional:
 | `SVARTAL_ISSUER`       | `https://api.svartal.com`   | OIDC issuer. Must be an HTTPS origin.      |
 | `SVARTAL_API_URL`      | the issuer                  | Svartal API origin, when it is split out.  |
 | `SVARTAL_RELAY_URL`    | `https://relay.svartal.com` | Relay origin.                              |
-| `SVARTAL_AUDIENCE`     | `t3-code-relay`             | Access-token audience.                     |
+| `SVARTAL_AUDIENCE`     | `svartal-relay`             | Access-token audience.                     |
 | `SVARTAL_CLIENT_ID`    | `svartal-cli`               | OIDC client id.                            |
 | `SVARTAL_REDIRECT_URI` | the two registered ones     | Only accepted if Svartal would accept it.  |
 | `SVARTAL_CONFIG_DIR`   | `$XDG_CONFIG_HOME/svartal`, else `~/.config/svartal` | Where the credential lives. |
 
 ## What it keeps on disk
 
-Three files, all `0600` in a `0700` directory, all **shared with the npm CLI**:
+Three files, all `0600` in a `0700` directory:
 
 | File                            | Contents                                                  |
 | ------------------------------- | --------------------------------------------------------- |
-| `t3.web.oidc.tokens.v1.json`    | the OIDC token set (`ID-20`)                              |
+| `svartal.oidc.tokens.v1.json`    | the OIDC token set (`ID-20`)                              |
 | `dpop.jwk.json`                 | the ES256 DPoP proof key                                   |
 | `shortnames.json`               | the words you gave your workspaces                        |
 
-Sign in with either CLI and you are signed in with both. Sign out with either
-and both are signed out. Deleting `~/.config/svartal` removes everything this
-program holds.
+Deleting `~/.config/svartal` removes everything this program holds. A sign-in
+recorded under the credential file's previous name is not read; run `sv login`
+once after updating.
 
 `shortnames.json` is a flat map of name to workspace id, with no version field
 and no wrapper, so another program can read or write it without agreeing to
@@ -246,9 +249,7 @@ anything first:
 }
 ```
 
-Both CLIs read and write it, over the same path and the same bytes: names given
-with `sv name` here are the ones `@svartal/cli` resolves, and the other way
-round. A name points at one workspace and a workspace answers to one name, so
+A name points at one workspace and a workspace answers to one name, so
 naming a workspace that already has a name replaces it. An entry that is not a
 usable name is skipped and the rest of the file still works — a shorthand is not
 worth failing a command over.

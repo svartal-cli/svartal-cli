@@ -3,7 +3,7 @@
 
 #![allow(dead_code)] // Each test binary uses a different slice of this.
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -21,35 +21,35 @@ pub fn json_response(status: u16, body: &Value) -> Response {
     Response { status, body: serde_json::to_vec(body).unwrap() }
 }
 
-type Router = Box<dyn Fn(&Request) -> Response>;
+type Router = Box<dyn Fn(&Request) -> Response + Send + Sync>;
 
 pub struct FakeTransport {
     router: Router,
-    requests: RefCell<Vec<Request>>,
+    requests: Mutex<Vec<Request>>,
 }
 
 impl FakeTransport {
-    pub fn new(router: impl Fn(&Request) -> Response + 'static) -> Self {
-        Self { router: Box::new(router), requests: RefCell::new(Vec::new()) }
+    pub fn new(router: impl Fn(&Request) -> Response + Send + Sync + 'static) -> Self {
+        Self { router: Box::new(router), requests: Mutex::new(Vec::new()) }
     }
 
     /// Every request, in order.
     pub fn requests(&self) -> Vec<Request> {
-        self.requests.borrow().clone()
+        self.requests.lock().unwrap().clone()
     }
 
     pub fn urls(&self) -> Vec<String> {
-        self.requests.borrow().iter().map(|request| request.url.clone()).collect()
+        self.requests.lock().unwrap().iter().map(|request| request.url.clone()).collect()
     }
 
     pub fn count(&self, url: &str) -> usize {
-        self.requests.borrow().iter().filter(|request| request.url == url).count()
+        self.requests.lock().unwrap().iter().filter(|request| request.url == url).count()
     }
 
     /// The form fields of the last request sent to `url`.
     pub fn last_form(&self, url: &str) -> Vec<(String, String)> {
         self.requests
-            .borrow()
+            .lock().unwrap()
             .iter()
             .rev()
             .find(|request| request.url == url)
@@ -62,7 +62,7 @@ impl FakeTransport {
 
     pub fn last_headers(&self, url: &str) -> Vec<(String, String)> {
         self.requests
-            .borrow()
+            .lock().unwrap()
             .iter()
             .rev()
             .find(|request| request.url == url)
@@ -74,7 +74,7 @@ impl FakeTransport {
 impl HttpTransport for FakeTransport {
     fn send(&self, request: Request) -> Result<Response, HttpError> {
         let response = (self.router)(&request);
-        self.requests.borrow_mut().push(request);
+        self.requests.lock().unwrap().push(request);
         Ok(response)
     }
 }

@@ -239,7 +239,7 @@ const SERVER_CONFIG = {
     policy: "loopback-browser",
     bootstrapMethods: ["one-time-token"],
     sessionMethods: ["dpop-access-token"],
-    sessionCookieName: "t3_session",
+    sessionCookieName: "svartal_session",
   },
   cwd: WORKSPACE_CWD,
   keybindingsConfigPath: `${WORKSPACE_CWD}/keybindings.json`,
