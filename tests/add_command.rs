@@ -375,3 +375,28 @@ fn the_runbook_wraps_inside_eighty_columns() {
         assert!(line.chars().count() <= 79, "{} columns: {line}", line.chars().count());
     }
 }
+
+// -- the two modes of one verb ----------------------------------------------
+
+/// `sv add <pairing-url>` and the runbook flags say two different things, so a
+/// line carrying both is refused whole — the same one sentence for every flag,
+/// because the answer does not depend on which flag it was.
+#[test]
+fn a_pairing_url_next_to_a_runbook_flag_is_refused_whole() {
+    let refused = add::route(Some("http://box.local:4100/pair#token=t"), true);
+    assert_eq!(refused, Err(add::URL_NEXT_TO_RUNBOOK_FLAGS.to_string()));
+    assert!(add::URL_NEXT_TO_RUNBOOK_FLAGS.contains("`sv add <pairing-url>`"));
+}
+
+/// Bare `sv add` — no URL, no flags — still writes the runbook, exactly as it
+/// did before the pairing-URL mode joined the verb.
+#[test]
+fn bare_add_still_routes_to_the_runbook() {
+    assert_eq!(add::route(None, false), Ok(add::AddRoute::Runbook));
+    let harness = Harness::new();
+    let runbook = harness.runbook();
+    assert!(runbook.contains("brok link"), "the runbook still prints the link command:\n{runbook}");
+
+    let url = "http://box.local:4100/pair#token=t";
+    assert_eq!(add::route(Some(url), false), Ok(add::AddRoute::Link(url)));
+}

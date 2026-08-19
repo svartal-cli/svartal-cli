@@ -264,3 +264,33 @@ pub const PRINT_TOKEN_ON_TERMINAL: &str = "Refusing to print your Svartal access
 
 pub const BOTH_TOKEN_MODES: &str =
     "`sv add` takes either --print-token or --token-file, not both.";
+
+/// One command line asking for both of `sv add`'s modes at once.
+///
+/// A pairing URL names the one machine to link; the runbook flags shape
+/// instructions for a machine that has no URL to give yet. Half-obeying either
+/// request would be a surprise, so the whole line is refused instead.
+pub const URL_NEXT_TO_RUNBOOK_FLAGS: &str = "A pairing URL already says which machine to link, so the runbook options do not apply: run `sv add <pairing-url>` alone, or `sv add` without a URL for the runbook.";
+
+/// Which of `sv add`'s two modes a command line asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddRoute<'a> {
+    /// A pairing URL was given: link the machine it points at.
+    Link(&'a str),
+    /// No URL: write the runbook (in whichever output the flags chose).
+    Runbook,
+}
+
+/// Tell `sv add`'s two modes apart, and refuse a line that asks for both.
+///
+/// `runbook_flag_given` is true when any of `--json`, `--origin`,
+/// `--publish-only`, `--print-token` or `--token-file` was on the line; which
+/// runbook output those flags then pick is the caller's decision, made only
+/// after this routing says the runbook is what was asked for.
+pub fn route(pairing_url: Option<&str>, runbook_flag_given: bool) -> Result<AddRoute<'_>, String> {
+    match pairing_url {
+        Some(_) if runbook_flag_given => Err(URL_NEXT_TO_RUNBOOK_FLAGS.to_string()),
+        Some(url) => Ok(AddRoute::Link(url)),
+        None => Ok(AddRoute::Runbook),
+    }
+}

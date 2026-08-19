@@ -29,7 +29,7 @@ the source comments (`ID-9`, `ID-16`, `ID-25`, …) are that document's.
 | `claude [target]`   | yes                | yes         | the same client in the `svartal-claude:` namespace; the workspace runs Claude inside the machine broker's runner container. The target may be omitted when only one workspace is reachable |
 | `close shell\|claude` | no               | yes         | **this binary only**, for now. Ends the detached terminal instead of detaching from it, and says when nothing was running; `--terminal-id` too. The sentences are the contract the npm CLI will copy |
 | `envs`              | yes                | yes         | The same join `machines` prints, workspace by workspace, with a SHORTNAME column; `--json` too |
-| `add`               | no                 | yes         | **this binary only.** How to connect a new machine, and the two safe ways to hand it a token. `--json`, `--origin`, `--publish-only`, `--print-token`, `--token-file` |
+| `add [pairing-url]` | no                 | yes         | **this binary first; the npm port follows.** With a pairing URL: link the machine you run it on to your account, from the single-use URL its environment server prints at startup. Without one: how to connect a new machine, and the two safe ways to hand it a token. `--json`, `--origin`, `--publish-only`, `--print-token`, `--token-file` |
 | `name`              | yes                | yes         | Give a workspace a short word to type; `--remove` forgets one. Both CLIs read and write the same file |
 | bare `sv`           | no (prints help)   | yes         | **this binary only.** On a terminal: the environment list, arrow keys, enter opens a shell. Off a terminal it prints the usage and exits 1, as before |
 
@@ -79,6 +79,7 @@ install -m 755 target/release/sv /usr/local/bin/sv
 sv                  # on a terminal: pick an environment, get a shell on it
 sv login            # opens a browser; --no-browser prints the URL instead
 sv whoami
+sv add 'http://box:4100/pair#token=…'  # on that machine: link it to your account
 sv envs             # your environments, with their short names
 sv add              # how to connect a new machine, and how to hand it a token
 sv name web 9b4eab… # call that workspace `web` from now on
@@ -111,8 +112,20 @@ When a word could mean more than one thing, the order is:
 
 ## Adding a machine
 
-`sv add` writes the runbook for connecting a new box, filled in with the relay
-this CLI is configured against.
+`sv add <pairing-url>` links the machine it runs on to your account, after
+`sv login`. The pairing URL is the one the machine's environment server prints
+every time it starts — `http://<host>:<port>/pair#token=…`; the hosted
+`…/pair?host=<host>#token=…` form works too. The link proof can only be signed
+by that server, and it refuses callers that are not on its own loopback, so
+the command must run **on the machine being added** — from anywhere else,
+forward the port first (`ssh -L 4100:127.0.0.1:4100 <machine>`) and run it
+there. Whatever host the URL names, `sv add` talks to `127.0.0.1` on the URL's
+port. The token is single-use and is spent on the first attempt, succeed or
+fail: after a failure past that point, take the fresh URL from the server's
+next start and run the command again.
+
+Without a pairing URL to point at, `sv add` writes the runbook for connecting
+a new box, filled in with the relay this CLI is configured against.
 
 There is no call that adds a machine on your behalf, and this command does not
 pretend otherwise. A machine becomes a Svartal machine by **linking itself**:
