@@ -22,7 +22,9 @@ With no command on a terminal, sv shows your environments and opens a shell on
 the one you pick.
 
 Commands:
-  login              Sign in to Svartal in this terminal.
+  login              Sign in to Svartal in this terminal. Also connects the
+                     knit CLI: a knit API token is minted and written into
+                     knit's global config, unless one is already there.
   logout             Revoke this terminal's Svartal credential and delete it.
   whoami             Show who this terminal is signed in as.
   machines           List the machines and workspaces you can reach.

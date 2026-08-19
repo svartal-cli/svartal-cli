@@ -89,11 +89,88 @@ pub fn login(context: &Context<'_>, out: &mut dyn Write) -> Result<(), CliError>
     let existing = context.client(0)?.existing_session().unwrap_or(None);
     if let Some(session) = existing {
         writeln!(out, "Already signed in as {}.", display_name(&session)).ok();
+        configure_knit(context, out, &session);
         return Ok(());
     }
     let session = sign_in(context, out)?;
     writeln!(out, "Signed in as {}.", display_name(&session)).ok();
+    configure_knit(context, out, &session);
     Ok(())
+}
+
+/// Signing in signs knit in too, the way `gh auth login` leaves git working:
+/// one knit API token is minted from this session and written into knit's
+/// user-global config. A remote that already has a token is left exactly as
+/// it is — it may carry hand-picked scopes a fresh default-scope token would
+/// silently lose — and nothing here can fail the login itself.
+fn configure_knit(context: &Context<'_>, out: &mut dyn Write, session: &Session) {
+    let api_url = context.config.api_base_url.trim_end_matches('/').to_string();
+
+    // The token is minted against sv's API origin, but the remote knit gets
+    // is the web origin people already use in knit configs: `api.svartal.com`
+    // and `svartal.com` serve the same API, and only the latter matches a
+    // remote somebody added by hand before sv could do it for them.
+    let api_host = api_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let host = api_host.strip_prefix("api.").unwrap_or(&api_host).to_string();
+    let scheme = if api_url.starts_with("http://") { "http" } else { "https" };
+    let url = format!("{scheme}://{host}");
+    let remote_name = host
+        .split(['.', ':'])
+        .next()
+        .filter(|label| !label.is_empty())
+        .unwrap_or("svartal")
+        .to_string();
+
+    let path = match crate::knit_config::global_config_path() {
+        Ok(path) => path,
+        Err(reason) => {
+            writeln!(out, "knit was not configured: {reason}").ok();
+            return;
+        }
+    };
+    match crate::knit_config::remote_state(&path, &remote_name, &url) {
+        crate::knit_config::RemoteState::Configured => return,
+        crate::knit_config::RemoteState::OtherServer { url: other } => {
+            writeln!(
+                out,
+                "knit was not configured: it already has a remote `{remote_name}` pointing at {other}."
+            )
+            .ok();
+            return;
+        }
+        crate::knit_config::RemoteState::Missing => {}
+    }
+
+    let minted = match api::mint_knit_token(
+        context.http,
+        &api_url,
+        &session.access_token,
+        &format!("sv login {host}"),
+    ) {
+        Ok(minted) => minted,
+        Err(error) => {
+            writeln!(out, "knit was not configured: {error}").ok();
+            return;
+        }
+    };
+    match crate::knit_config::install_remote(&path, &remote_name, &url, &minted.secret) {
+        Ok(_installed) => {
+            writeln!(out, "knit is connected to {host}: remote `{remote_name}` in {}.", path.display())
+                .ok();
+            if let Some(expires_at) = &minted.expires_at {
+                writeln!(out, "Its token expires {expires_at}; `sv login` renews it.").ok();
+            }
+        }
+        Err(reason) => {
+            writeln!(out, "knit was not configured: {reason}").ok();
+        }
+    }
 }
 
 /// The whole headless sign-in: listen on a registered loopback callback, send

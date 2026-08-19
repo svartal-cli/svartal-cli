@@ -21,6 +21,7 @@ pub mod dpop;
 pub mod fsutil;
 pub mod http;
 pub mod jwt;
+pub mod knit_config;
 pub mod link;
 pub mod loopback;
 pub mod oidc;
