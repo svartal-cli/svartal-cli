@@ -724,18 +724,22 @@ fn a_fresh_claude_terminal_is_not_greeted_as_one_you_were_already_in() {
     assert!(!session.reattached);
 }
 
-/// Pinned deliberately. Against a workspace image that predates `created`,
-/// reading the missing field as "not reattached" would tell a person their
-/// long-running session is a new one, which is the worse of the two errors.
+/// The old-guess fallback for a workspace without `created` was pinned here on
+/// the theory that calling a long-running session new was the worse error. Live
+/// use overturned it: three fresh opens against the deployed v0.1.47 workspace
+/// (shell and Claude, 2026-08-19) were all greeted "Back in your \u{2026}", because a
+/// fresh PTY is already running with a pid at snapshot time — the guess can
+/// only ever answer "reattached". A missing field now reads as fresh, and only
+/// an explicit `created: false` reads as a reattach.
 #[test]
-fn a_workspace_without_created_falls_back_to_the_old_guess() {
+fn a_workspace_without_created_reads_as_fresh() {
     let (shell_session, _) = open_against(
         TerminalKind::Shell,
         open_snapshot(json!({ "status": "running", "pid": 4_242 })),
         None,
         None,
     );
-    assert!(shell_session.reattached);
+    assert!(!shell_session.reattached);
 
     let (fresh, _) = open_against(
         TerminalKind::Shell,
@@ -751,7 +755,7 @@ fn a_workspace_without_created_falls_back_to_the_old_guess() {
         None,
         None,
     );
-    assert!(claude.reattached);
+    assert!(!claude.reattached);
 }
 
 /// `TERM` names a terminfo entry; `COLORTERM` is the separate signal that says
@@ -783,7 +787,7 @@ fn a_terminal_with_no_colour_capability_sends_no_key_at_all() {
 }
 
 #[test]
-fn a_reattached_shell_is_recognised_by_its_running_pid() {
+fn a_reattached_shell_is_recognised_by_the_workspaces_answer() {
     let fixture = fixture("shell.json");
     let config = fixture["serverFrames"][0].clone();
     let running = json!({
@@ -798,6 +802,7 @@ fn a_reattached_shell_is_recognised_by_its_running_pid() {
                 "worktreePath": null,
                 "status": "running",
                 "pid": 4_242,
+                "created": false,
                 "history": "",
                 "exitCode": null,
                 "exitSignal": null,

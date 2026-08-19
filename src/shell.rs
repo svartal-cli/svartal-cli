@@ -474,28 +474,20 @@ fn with_terminal_description(
 /// Whether the workspace handed back a terminal that was already running.
 ///
 /// The workspace answers this itself, in `created`: it either spawned a process
-/// or found one, and it is the only party that can tell the two apart. The
-/// branch below it is what this CLI had to do before that field existed, kept
-/// only for a workspace image that has not been updated yet.
+/// or found one, and it is the only party that can tell the two apart. This
+/// says "reattached" only when the workspace explicitly said `created: false`.
 ///
-/// That old guess is wrong, and visibly so. A freshly spawned PTY is reported
-/// `running` with a pid within milliseconds, so "running with a pid" is true of
-/// a shell that has never existed before — every new terminal was greeted with
-/// "Back in your shell". A provider terminal has no local pid at all, so there
-/// the guess degraded further, to "running at all", which is true of every
-/// provider terminal the moment it starts.
-///
-/// It stays as a fallback because the alternative is worse: against an older
-/// workspace, reading a missing field as "not reattached" would tell a person
-/// their long-running Claude session is a new one.
-fn was_reattached(snapshot: &Value, kind: TerminalKind) -> bool {
-    if let Some(created) = snapshot.get("created").and_then(Value::as_bool) {
-        return !created;
-    }
-    let running = snapshot.get("status").and_then(Value::as_str) == Some("running");
-    running
-        && (kind == TerminalKind::Claude
-            || snapshot.get("pid").is_some_and(|pid| !pid.is_null()))
+/// When the field is absent — a workspace image that predates it — the open
+/// reads as fresh. This binary used to fall back to the old guess ("running
+/// with a pid", or for a provider terminal "running at all") on the theory
+/// that calling a long-running session new was the worse error. But the guess
+/// cannot make that call: a freshly spawned PTY is reported `running` with a
+/// pid within milliseconds, so the guess answered "reattached" for every open
+/// there has ever been. Three live fresh opens against the deployed v0.1.47
+/// workspace — shell and Claude — all greeted "Back in your …" (2026-08-19).
+/// A fallback with only one answer protects nobody; absence means fresh.
+fn was_reattached(snapshot: &Value) -> bool {
+    snapshot.get("created").and_then(Value::as_bool) == Some(false)
 }
 
 /// Read the workspace's config for the root to open in, then open (or pick up)
@@ -553,7 +545,7 @@ pub fn open_shell<T: RpcTransport>(
         });
     }
 
-    let reattached = was_reattached(&snapshot, kind);
+    let reattached = was_reattached(&snapshot);
     Ok(ShellSession {
         kind,
         thread_id,
