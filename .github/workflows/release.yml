@@ -92,7 +92,7 @@ jobs:
 
           read_sha() {
             local target="$1"
-            awk '{print $1}' "shas/sv-v${version}-${target}.tar.gz.sha256"
+            awk '{print $1}' "shas/sv-v${version}-${target}.sha256"
           }
 
           arm_macos_sha="$(read_sha aarch64-apple-darwin)"
