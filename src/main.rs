@@ -38,6 +38,10 @@ Commands:
                      End the shell on a workspace, without attaching to it.
   close claude [target]
                      End the Claude terminal on a workspace.
+  ssh-setup <target> Set this machine's ssh config up to reach a workspace,
+                     so `ssh svartal-<name>` works.
+  ssh-proxy <target> Carry one ssh connection to a workspace. Run by ssh from
+                     the ProxyCommand line ssh-setup wrote, not by hand.
 
 A target is a short name, a workspace id, a workspace name, or a machine name.
 
@@ -54,6 +58,10 @@ Options:
   --print-token      Write only a Svartal access token to stdout, to pipe into
                      the new box (add). Refused when stdout is a terminal.
   --token-file <p>   Write that token to a 0600 file instead (add).
+  --print            Print the ~/.ssh/config block instead of writing it
+                     (ssh-setup).
+  --reset-hosts      Forget the workspace host key recorded for this host
+                     first (ssh-setup).
   -h, --help         Show this message.
   -V, --version      Show the version.
 ";
@@ -61,7 +69,11 @@ Options:
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match run(&arguments) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(0) => ExitCode::SUCCESS,
+        // `sv ssh-proxy` ends with the connection's own status, because that is
+        // the only thing `ssh` can still read once the pump has started
+        // (`ssh-bridge.md` §8.5). Every other command answers 0 or fails.
+        Ok(code) => ExitCode::from(code),
         Err(message) => {
             let mut stderr = std::io::stderr();
             writeln!(stderr, "sv: {message}").ok();
@@ -70,13 +82,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(arguments: &[String]) -> Result<(), String> {
+fn run(arguments: &[String]) -> Result<u8, String> {
     let mut stdout = std::io::stdout();
     let command = arguments.first().map(String::as_str).unwrap_or_default();
     match command {
         "-h" | "--help" | "help" => {
             write!(stdout, "{USAGE}").ok();
-            return Ok(());
+            return Ok(0);
         }
         "" if !svartal::terminal::is_interactive() => {
             // Off a terminal there is nobody to pick from a list, so this stays
@@ -88,7 +100,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
         }
         "-V" | "--version" => {
             writeln!(stdout, "sv v{}", env!("CARGO_PKG_VERSION")).ok();
-            return Ok(());
+            return Ok(0);
         }
         _ => {}
     }
@@ -99,6 +111,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
         "login" => &["--no-browser"],
         "shell" | "claude" | "close" => &["--terminal-id"],
         "name" => &["--remove"],
+        "ssh-setup" => &["--print", "--reset-hosts"],
         "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
         "whoami" | "machines" | "envs" | "sessions" => &["--json"],
         _ => &[],
@@ -111,6 +124,8 @@ fn run(arguments: &[String]) -> Result<(), String> {
     let mut publish_only = false;
     let mut print_token = false;
     let mut token_file: Option<String> = None;
+    let mut print_block = false;
+    let mut reset_hosts = false;
     let mut positional: Vec<&str> = Vec::new();
     // `sv` with nothing after it has no argument list to walk, not even an
     // empty one: the command itself is the missing element.
@@ -148,6 +163,8 @@ fn run(arguments: &[String]) -> Result<(), String> {
                 );
             }
             "--publish-only" => publish_only = true,
+            "--print" => print_block = true,
+            "--reset-hosts" => reset_hosts = true,
             "--print-token" => print_token = true,
             "--token-file" => {
                 token_file = Some(
@@ -221,6 +238,28 @@ fn run(arguments: &[String]) -> Result<(), String> {
                 )
             }
         },
+        // `ssh` runs this one, and reads its exit status as the connection's.
+        // It is answered before the ordinary dispatch so that status can leave
+        // this function instead of being flattened to success or failure.
+        "ssh-proxy" => {
+            let Some(target) = positional.first().copied() else {
+                return Err(
+                    "`sv ssh-proxy` needs the workspace to connect to. It is normally run by ssh, from the ProxyCommand line `sv ssh-setup` wrote."
+                        .to_string(),
+                );
+            };
+            let code = commands::ssh_proxy(&context, target).map_err(|error| error.to_string())?;
+            return Ok(u8::try_from(code).unwrap_or(1));
+        }
+        "ssh-setup" => {
+            let Some(target) = positional.first().copied() else {
+                return Err(
+                    "`sv ssh-setup` needs the machine or workspace to set up. Run `sv envs` to see them."
+                        .to_string(),
+                );
+            };
+            commands::ssh_setup(&context, &mut stdout, &environment, target, print_block, reset_hosts)
+        }
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
         "shell" => {
             let Some(target) = positional.first().copied() else {
@@ -270,5 +309,5 @@ fn run(arguments: &[String]) -> Result<(), String> {
             return Err(format!("`{other}` is not an sv command. Run `sv --help` to see what is."));
         }
     };
-    outcome.map_err(|error| error.to_string())
+    outcome.map(|()| 0).map_err(|error| error.to_string())
 }

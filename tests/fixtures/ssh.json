@@ -1,0 +1,111 @@
+{
+  "relayUrl": "https://relay.example.com",
+  "httpBaseUrl": "https://workspace.example.com",
+  "wsBaseUrl": "wss://workspace.example.com",
+  "environmentId": "env-fixture-0001",
+  "shortname": "fixture",
+  "alias": "svartal-fixture",
+  "privateJwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "gIM9Zyiqs6b9rsCD1rnUWlY4KdbMG0_ZoiN-o3R5-dE",
+    "y": "mXO03LW1mqi7gU76vC6EYr7p4SsPHAPY1eiQPt0IiSc",
+    "d": "E5fWojxBXygO15oCGp0gdiy1vZ71-cPnMnL-4Ttv6GI"
+  },
+  "target": {
+    "environmentId": "env-fixture-0001",
+    "label": "Primary",
+    "machineName": "workbench",
+    "linked": true,
+    "machinePresence": "unknown"
+  },
+  "clientPublicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureClientKeyAAAAAAAAAAAAAAAAAAAAAAA person@laptop",
+  "hostPublicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyAAAAAAAAAAAAAAAAAAAAAAAAA svartal-workspace",
+  "connectionId": "c1a2b3d4e5f6a7b8",
+  "socketUrl": "wss://workspace.example.com/ssh?wsTicket=ws-ticket-ssh-fixture",
+  "httpCalls": [
+    {
+      "url": "https://relay.example.com/v1/client/dpop-token",
+      "method": "POST",
+      "authorization": null,
+      "hasDpopProof": true,
+      "dpopClaims": {
+        "htm": "POST",
+        "htu": "https://relay.example.com/v1/client/dpop-token",
+        "jti": "593c102b-c911-4f3c-afe5-7de2e2bb57ef",
+        "iat": 1787159152
+      },
+      "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=oidc-access-token&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2F%2Frelay.example.com&scope=environment%3Aconnect&client_id=svartal-cli"
+    },
+    {
+      "url": "https://relay.example.com/v1/environments/env-fixture-0001/connect",
+      "method": "POST",
+      "authorization": "DPoP relay-access-token",
+      "hasDpopProof": true,
+      "dpopClaims": {
+        "htm": "POST",
+        "htu": "https://relay.example.com/v1/environments/env-fixture-0001/connect",
+        "jti": "e42f97d3-69ab-447d-8872-0e10b1e97f41",
+        "iat": 1787159152,
+        "ath": "-M3NHAaxswmcT56jeetLC28qdSxzQTiIKIPCCf03fkE"
+      },
+      "body": "{\"clientProofKeyThumbprint\":\"qE8IIskYdgrNmuk-iarrpPvJhIZ-jCOUBsJisLa6Yc0\"}"
+    },
+    {
+      "url": "https://workspace.example.com/oauth/token",
+      "method": "POST",
+      "authorization": null,
+      "hasDpopProof": true,
+      "dpopClaims": {
+        "htm": "POST",
+        "htu": "https://workspace.example.com/oauth/token",
+        "jti": "05fc09bc-62af-42b9-b8d4-3d6c8d71ef39",
+        "iat": 1787159152
+      },
+      "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=environment-credential&subject_token_type=urn%3At3%3Aparams%3Aoauth%3Atoken-type%3Aenvironment-bootstrap&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&scope=terminal%3Aoperate&client_label=svartal+CLI&client_device_type=desktop"
+    },
+    {
+      "url": "https://workspace.example.com/api/auth/websocket-ticket",
+      "method": "POST",
+      "authorization": "DPoP workspace-access-token",
+      "hasDpopProof": true,
+      "dpopClaims": {
+        "htm": "POST",
+        "htu": "https://workspace.example.com/api/auth/websocket-ticket",
+        "jti": "ddf69267-abba-4d66-b2fb-38533bb7b334",
+        "iat": 1787159152,
+        "ath": "3mjY2PMoTuPQLl3VB1HXx7l6gT9NJLvpNDq-1ErvuUw"
+      },
+      "body": ""
+    }
+  ],
+  "stdinChunks": [
+    "5353482d322e302d4f70656e5353485f392e360d0a",
+    "0000000c0a14fffe8041"
+  ],
+  "clientFrames": [
+    "01000000887b227075626c69634b6579223a227373682d65643235353139204141414143334e7a6143316c5a4449314e544535414141414946697874757265436c69656e744b6579414141414141414141414141414141414141414141414120706572736f6e406c6170746f70222c22636c69656e744e616d65223a227376222c2276657273696f6e223a317d",
+    "02000000155353482d322e302d4f70656e5353485f392e360d0a",
+    "020000000a0000000c0a14fffe8041",
+    "0300000000"
+  ],
+  "serverFrames": [
+    "81000000947b22636f6e6e656374696f6e4964223a2263316132623364346535663661376238222c22686f73745075626c69634b6579223a227373682d65643235353139204141414143334e7a6143316c5a4449314e544535414141414946697874757265486f73744b657941414141414141414141414141414141414141414141414141207376617274616c2d776f726b7370616365227d",
+    "82000000205353482d322e302d4f70656e5353485f392e3270312044656269616e2d320d0a",
+    "820000000a0000012c0514c328ff00",
+    "83000000257b22726561736f6e223a22737368645f657869746564222c2265786974436f6465223a307d"
+  ],
+  "stdoutChunks": [
+    "5353482d322e302d4f70656e5353485f392e3270312044656269616e2d320d0a",
+    "0000012c0514c328ff00"
+  ],
+  "knownHosts": [
+    "svartal-fixture ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyAAAAAAAAAAAAAAAAAAAAAAAAA svartal-workspace"
+  ],
+  "configBlock": "# >>> sv ssh-setup svartal-fixture >>>\nHost svartal-fixture\n  User svartal\n  ProxyCommand /usr/local/bin/sv ssh-proxy fixture\n  IdentityFile /home/person/.config/svartal/ssh/id_ed25519\n  IdentitiesOnly yes\n  UserKnownHostsFile /home/person/.config/svartal/ssh/known_hosts\n  StrictHostKeyChecking accept-new\n  ForwardAgent no\n# <<< sv ssh-setup svartal-fixture <<<",
+  "outcome": {
+    "reason": "sshd_exited",
+    "exitCode": 0,
+    "connectionId": "c1a2b3d4e5f6a7b8"
+  }
+}

@@ -39,6 +39,15 @@ pub const ORCHESTRATION_READ_SCOPE: &str = "orchestration:read";
 /// them. Both are load-bearing; see `ORCHESTRATION_READ_SCOPE`.
 pub const SHELL_SCOPES: [&str; 2] = [TERMINAL_OPERATE_SCOPE, ORCHESTRATION_READ_SCOPE];
 
+/// The one scope `sv ssh-proxy` asks for.
+///
+/// `ssh-bridge.md` §2: `terminal:operate`, and only that. There is no
+/// SSH-specific scope, because `terminal:operate` already grants arbitrary
+/// command execution as the workspace account — an SSH session is a second
+/// door onto that room — and nothing on the bridge path looks a working
+/// directory up, so `orchestration:read` stays out of the token.
+pub const SSH_SCOPES: [&str; 1] = [TERMINAL_OPERATE_SCOPE];
+
 /// The one scope `sv close` asks for. Closing never reads the workspace
 /// config — there is no cwd to learn — so `orchestration:read` stays out of
 /// the token: every terminal call, the metadata read included, is gated on
@@ -221,12 +230,26 @@ pub fn issue_websocket_ticket(
 /// `resolveRemoteDpopWebSocketConnectionUrl`: the ws base URL, with `/ws` when
 /// it carries no path of its own, and the ticket in the query.
 pub fn websocket_url(ws_base_url: &str, ticket: &str) -> Result<String, WorkspaceError> {
+    websocket_url_at(ws_base_url, "/ws", ticket)
+}
+
+/// The same rule for any route on the same socket port.
+///
+/// The RPC protocol lives on `/ws` and the ssh bridge on `/ssh`; a base URL
+/// that carries a path of its own keeps it, with the route underneath.
+pub fn websocket_url_at(
+    ws_base_url: &str,
+    path: &str,
+    ticket: &str,
+) -> Result<String, WorkspaceError> {
     let mut url = Url::parse(ws_base_url).map_err(|error| WorkspaceError::Failed {
         label: ws_base_url.to_string(),
         detail: format!("the workspace WebSocket URL is not a URL: {error}"),
     })?;
     if url.path().is_empty() || url.path() == "/" {
-        url.set_path("/ws");
+        url.set_path(path);
+    } else {
+        url.set_path(&format!("{}{path}", url.path().trim_end_matches('/')));
     }
     url.query_pairs_mut().clear().append_pair("wsTicket", ticket);
     Ok(url.to_string())

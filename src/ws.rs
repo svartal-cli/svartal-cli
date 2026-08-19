@@ -84,6 +84,77 @@ impl WebSocketTransport {
     }
 }
 
+/// One binary-frame transport.
+///
+/// The RPC protocol is text and the ssh bridge is bytes, so they are two
+/// traits over the same socket rather than one trait that carries both: a
+/// `String` in the ssh path would mean a decode, and an SSH binary packet does
+/// not survive one.
+///
+/// `recv` returns `Ok(None)` when the wait elapsed with no message, which is
+/// what lets one thread own the socket and still do other work.
+pub trait BinaryTransport {
+    fn recv(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, TransportError>;
+    fn send(&mut self, bytes: &[u8]) -> Result<(), TransportError>;
+
+    /// The descriptor that becomes readable when the workspace sends something.
+    fn readable_fd(&self) -> Option<RawFd> {
+        None
+    }
+
+    /// Hang up politely when the caller is done.
+    fn shutdown(&mut self) {}
+}
+
+impl BinaryTransport for WebSocketTransport {
+    fn readable_fd(&self) -> Option<RawFd> {
+        self.tcp_stream().map(AsRawFd::as_raw_fd)
+    }
+
+    fn shutdown(&mut self) {
+        self.close();
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, TransportError> {
+        self.set_timeouts(timeout)?;
+        match self.socket.read() {
+            Ok(Message::Binary(bytes)) => Ok(Some(bytes.to_vec())),
+            // `ssh-bridge.md` §2: binary only. A text message is a protocol
+            // error, not something to decode and hope about.
+            Ok(Message::Text(_)) => Err(TransportError::Failed(
+                "the workspace sent a text message on the ssh bridge.".to_string(),
+            )),
+            // Control frames are answered by the library; nothing to hand up.
+            Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => Ok(None),
+            Ok(Message::Close(_)) => Err(TransportError::Closed(closed_message())),
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                Err(TransportError::Closed(closed_message()))
+            }
+            Err(error) => Err(TransportError::Failed(describe(&error))),
+        }
+    }
+
+    fn send(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        match self.socket.send(Message::Binary(bytes.to_vec().into())) {
+            Ok(()) => Ok(()),
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                Err(TransportError::Closed(closed_message()))
+            }
+            Err(error) => Err(TransportError::Failed(describe(&error))),
+        }
+    }
+}
+
 impl RpcTransport for WebSocketTransport {
     fn readable_fd(&self) -> Option<RawFd> {
         self.tcp_stream().map(AsRawFd::as_raw_fd)

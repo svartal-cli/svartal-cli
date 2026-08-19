@@ -29,6 +29,7 @@ pub mod relay;
 pub mod rpc;
 pub mod shell;
 pub mod shortnames;
+pub mod sshproxy;
 pub mod store;
 pub mod target;
 pub mod terminal;
