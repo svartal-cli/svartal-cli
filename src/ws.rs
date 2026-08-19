@@ -21,6 +21,13 @@ use crate::rpc::{RpcTransport, TransportError};
 /// `SOCKET_OPEN_TIMEOUT` in the reference session factory.
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// What the ssh bridge reports when the far end sent a text message.
+///
+/// Named once, here, because it is the detail the pump prints after "broke the
+/// protocol:" — the sentence a person sees is written in this register, not in
+/// the WebSocket library's.
+pub const TEXT_ON_THE_SSH_BRIDGE: &str = "a text message";
+
 pub struct WebSocketTransport {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
 }
@@ -120,10 +127,11 @@ impl BinaryTransport for WebSocketTransport {
         match self.socket.read() {
             Ok(Message::Binary(bytes)) => Ok(Some(bytes.to_vec())),
             // `ssh-bridge.md` §2: binary only. A text message is a protocol
-            // error, not something to decode and hope about.
-            Ok(Message::Text(_)) => Err(TransportError::Failed(
-                "the workspace sent a text message on the ssh bridge.".to_string(),
-            )),
+            // error, not something to decode and hope about, and not a
+            // connection that merely ended — the pump says so on stderr.
+            Ok(Message::Text(_)) => {
+                Err(TransportError::Protocol(TEXT_ON_THE_SSH_BRIDGE.to_string()))
+            }
             // Control frames are answered by the library; nothing to hand up.
             Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => Ok(None),
             Ok(Message::Close(_)) => Err(TransportError::Closed(closed_message())),

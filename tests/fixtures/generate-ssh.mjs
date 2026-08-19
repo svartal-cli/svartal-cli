@@ -46,12 +46,13 @@ const fromSource = (...segments) => import(pathToFileURL(NodePath.join(packages,
 
 const { importDpopKey } = await fromSource("shared", "src", "dpopProof.ts");
 const { runSshProxy } = await fromSource("svartal-cli", "src", "sshProxy.ts");
-const { sshConfigBlock, hostAlias, readKnownHosts } = await fromSource(
+const { sshConfigBlock, hostAlias } = await fromSource(
   "svartal-cli",
   "src",
   "sshSetup.ts",
 );
 const contracts = await fromSource("contracts", "src", "index.ts");
+const sharedSsh = await fromSource("shared", "src", "sshBridge.ts");
 const Effect = await fromIvaldi("effect/Effect");
 const Layer = await fromIvaldi("effect/Layer");
 const Socket = await fromIvaldi("effect/unstable/socket/Socket");
@@ -305,7 +306,7 @@ await waitForFrames(1);
 // 2. READY, always the server's first frame. The client records the host key
 //    before it pumps a single byte.
 socket.serverMessage(
-  contracts.encodeSshReadyFrame({
+  sharedSsh.encodeSshReadyFrame({
     connectionId: CONNECTION_ID,
     hostPublicKey: HOST_PUBLIC_KEY,
   }),
@@ -316,12 +317,12 @@ stdio.end();
 await waitForFrames(1 + STDIN_CHUNKS.length + 1);
 // 4. Output, then the sshd's own status.
 for (const chunk of STDOUT_CHUNKS) {
-  socket.serverMessage(...contracts.encodeSshStdoutFrames(Uint8Array.from(chunk)));
+  socket.serverMessage(...sharedSsh.encodeSshStdoutFrames(Uint8Array.from(chunk)));
 }
-socket.serverMessage(contracts.encodeSshExitFrame({ reason: "sshd_exited", exitCode: 0 }));
+socket.serverMessage(sharedSsh.encodeSshExitFrame({ reason: "sshd_exited", exitCode: 0 }));
 
 const outcome = await running;
-const knownHosts = readKnownHosts(knownHostsFile);
+const knownHosts = NodeFs.readFileSync(knownHostsFile, "utf8").split("\n").filter((line) => line.length > 0);
 
 // The other half of the feature: the block `sv ssh-setup` writes. Recorded with
 // fixed paths so the Rust side can byte-match the text.

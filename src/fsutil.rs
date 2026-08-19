@@ -143,7 +143,8 @@ pub fn remove_file(path: &Path) -> Result<(), FsError> {
     }
 }
 
-fn random_suffix() -> Result<String, FsError> {
+/// Random hex, for a name or a token nothing else will pick.
+pub(crate) fn random_suffix() -> Result<String, FsError> {
     let mut bytes = [0u8; 8];
     getrandom::getrandom(&mut bytes).map_err(|_| err("the system random source is unavailable"))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())

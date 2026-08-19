@@ -629,10 +629,12 @@ where
 /// Applying is the default, because the thing a person asked for is a working
 /// host, not a block of text to paste. `--print` is the opt-out.
 ///
-/// The name in the alias is the short name recorded with `sv name` when there
-/// is one, and otherwise the word that was typed — so the `ProxyCommand`
-/// carries a resolved name and never has to work one out from `%h` at connect
-/// time.
+/// The word in the `ProxyCommand` — and in the alias built from it — is the
+/// short name recorded with `sv name` when there is one, and otherwise the
+/// workspace id. Both resolve on their own, which is the whole requirement:
+/// `ssh` hands that word straight back to `sv ssh-proxy` with nothing else, so
+/// the display name the person typed ("My Box", a label the workspace can
+/// rename underneath them) would not survive the trip.
 pub fn ssh_setup(
     context: &Context<'_>,
     out: &mut dyn Write,
@@ -646,10 +648,12 @@ pub fn ssh_setup(
     let resolved =
         crate::target::select_shell_target(&view, &shortnames, target).map_err(CliError::of)?;
     let ssh_config_path = sshproxy::default_ssh_config_path(environment).map_err(CliError::of)?;
+    // The alias is built from this same word, so `known_hosts` is keyed by the
+    // host `ssh` looks up and the key recorded on `READY` is the one it checks.
     let name = shortnames
         .shortname_of(&resolved.environment_id)
         .map(str::to_string)
-        .unwrap_or_else(|| sshproxy::alias_token(target));
+        .unwrap_or_else(|| resolved.environment_id.clone());
 
     let outcome = sshproxy::run_ssh_setup(&sshproxy::SetupInput {
         state_directory: &context.config.state_directory,

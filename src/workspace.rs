@@ -229,30 +229,44 @@ pub fn issue_websocket_ticket(
 
 /// `resolveRemoteDpopWebSocketConnectionUrl`: the ws base URL, with `/ws` when
 /// it carries no path of its own, and the ticket in the query.
-pub fn websocket_url(ws_base_url: &str, ticket: &str) -> Result<String, WorkspaceError> {
-    websocket_url_at(ws_base_url, "/ws", ticket)
-}
-
-/// The same rule for any route on the same socket port.
 ///
-/// The RPC protocol lives on `/ws` and the ssh bridge on `/ssh`; a base URL
-/// that carries a path of its own keeps it, with the route underneath.
-pub fn websocket_url_at(
-    ws_base_url: &str,
-    path: &str,
-    ticket: &str,
-) -> Result<String, WorkspaceError> {
-    let mut url = Url::parse(ws_base_url).map_err(|error| WorkspaceError::Failed {
-        label: ws_base_url.to_string(),
-        detail: format!("the workspace WebSocket URL is not a URL: {error}"),
-    })?;
+/// A base URL that already carries a path is left exactly as it is. The relay
+/// mints this URL as the RPC endpoint itself — `wss://<host>/ws` — rather than
+/// as a prefix, so appending anything to it asks for a route no workspace
+/// serves.
+pub fn websocket_url(ws_base_url: &str, ticket: &str) -> Result<String, WorkspaceError> {
+    let mut url = parse_url(ws_base_url)?;
     if url.path().is_empty() || url.path() == "/" {
-        url.set_path(path);
-    } else {
-        url.set_path(&format!("{}{path}", url.path().trim_end_matches('/')));
+        url.set_path("/ws");
     }
     url.query_pairs_mut().clear().append_pair("wsTicket", ticket);
     Ok(url.to_string())
+}
+
+/// The ssh bridge's socket URL, built from the workspace's **HTTP** base URL.
+///
+/// Deliberately not from the ws base URL: that one is the `/ws` endpoint, and
+/// `wss://<host>/ws/ssh` is not the bridge. The HTTP base URL is the workspace
+/// itself — origin, plus whatever path prefix it is published under — and every
+/// route hangs off it, so the scheme becomes a WebSocket one and the route goes
+/// on the end.
+pub fn websocket_route_url(
+    http_base_url: &str,
+    route: &str,
+    ticket: &str,
+) -> Result<String, WorkspaceError> {
+    let mut url = parse_url(&default_ws_base_url(http_base_url)?)?;
+    let prefix = url.path().trim_end_matches('/').to_string();
+    url.set_path(&format!("{prefix}{route}"));
+    url.query_pairs_mut().clear().append_pair("wsTicket", ticket);
+    Ok(url.to_string())
+}
+
+fn parse_url(value: &str) -> Result<Url, WorkspaceError> {
+    Url::parse(value).map_err(|error| WorkspaceError::Failed {
+        label: value.to_string(),
+        detail: format!("the workspace WebSocket URL is not a URL: {error}"),
+    })
 }
 
 /// The ws base URL a caller falls back to when the relay reported none:

@@ -32,8 +32,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://relay.example.com/v1/client/dpop-token",
-        "jti": "593c102b-c911-4f3c-afe5-7de2e2bb57ef",
-        "iat": 1787159152
+        "jti": "fb44fc21-d1f8-43a8-bc41-8a3eba1bc0b9",
+        "iat": 1787174123
       },
       "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=oidc-access-token&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2F%2Frelay.example.com&scope=environment%3Aconnect&client_id=svartal-cli"
     },
@@ -45,8 +45,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://relay.example.com/v1/environments/env-fixture-0001/connect",
-        "jti": "e42f97d3-69ab-447d-8872-0e10b1e97f41",
-        "iat": 1787159152,
+        "jti": "59de1950-206d-44fb-83af-ea08674f73a9",
+        "iat": 1787174123,
         "ath": "-M3NHAaxswmcT56jeetLC28qdSxzQTiIKIPCCf03fkE"
       },
       "body": "{\"clientProofKeyThumbprint\":\"qE8IIskYdgrNmuk-iarrpPvJhIZ-jCOUBsJisLa6Yc0\"}"
@@ -59,8 +59,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://workspace.example.com/oauth/token",
-        "jti": "05fc09bc-62af-42b9-b8d4-3d6c8d71ef39",
-        "iat": 1787159152
+        "jti": "e0a2ffce-64a4-4c8a-8ae7-3bfaf9b40fa8",
+        "iat": 1787174123
       },
       "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=environment-credential&subject_token_type=urn%3At3%3Aparams%3Aoauth%3Atoken-type%3Aenvironment-bootstrap&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&scope=terminal%3Aoperate&client_label=svartal+CLI&client_device_type=desktop"
     },
@@ -72,8 +72,8 @@
       "dpopClaims": {
         "htm": "POST",
         "htu": "https://workspace.example.com/api/auth/websocket-ticket",
-        "jti": "ddf69267-abba-4d66-b2fb-38533bb7b334",
-        "iat": 1787159152,
+        "jti": "64f9886d-a254-4a27-b627-bf77a60cdedd",
+        "iat": 1787174123,
         "ath": "3mjY2PMoTuPQLl3VB1HXx7l6gT9NJLvpNDq-1ErvuUw"
       },
       "body": ""

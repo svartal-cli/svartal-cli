@@ -133,6 +133,13 @@ Host svartal-web
 # <<< sv ssh-setup svartal-web <<<
 ```
 
+The word after `ssh-proxy` — and the `<name>` in the alias — is the short name
+you gave that workspace, or its workspace id when you have not given one. `ssh`
+hands that word straight back to `sv ssh-proxy` with nothing else beside it, so
+it has to be one that resolves on its own; a workspace label like `My Box` does
+not survive the trip. Name the workspace first (`sv name web Primary`) if you
+want the readable host in the block above.
+
 Running it again replaces that block and nothing around it. `--print` prints
 the block instead of writing it, for someone who keeps their ssh config under
 version control, and `--reset-hosts` forgets the workspace host key recorded

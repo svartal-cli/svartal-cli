@@ -118,8 +118,40 @@ impl ProxyStdio for ScriptedStdio {
         }
     }
 
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.written.push(bytes.to_vec());
+        Ok(())
+    }
+}
+
+/// The local end with a stdout nothing is reading: a real pipe whose read side
+/// is closed, so the write fails the way `ssh` going away makes it fail.
+struct BrokenStdout {
+    pipe: std::fs::File,
+}
+
+impl BrokenStdout {
+    fn new() -> Self {
+        let mut ends = [0 as libc::c_int; 2];
+        // SAFETY: `pipe` fills two descriptors into an array this frame owns.
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "pipe failed");
+        // SAFETY: the read end is ours and is closed exactly once.
+        unsafe { libc::close(ends[0]) };
+        // SAFETY: the write end is ours; `File` owns it from here.
+        let pipe = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(ends[1]) };
+        Self { pipe }
+    }
+}
+
+impl ProxyStdio for BrokenStdout {
+    fn take_input(&mut self) -> InputPoll {
+        InputPoll::None
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+        self.pipe.write_all(bytes)?;
+        self.pipe.flush()
     }
 }
 
@@ -523,12 +555,40 @@ fn output_before_ready_is_a_protocol_error() {
 
 #[test]
 fn the_exit_status_is_the_documents_status() {
-    assert_eq!(exit_status_for("sshd_exited", Some(0)), 0);
-    assert_eq!(exit_status_for("sshd_exited", Some(7)), 7);
-    assert_eq!(exit_status_for("sshd_exited", None), 1);
-    assert_eq!(exit_status_for("sshd_exited", Some(999)), 1);
-    assert_eq!(exit_status_for("client_closed", Some(0)), 1);
-    assert_eq!(exit_status_for("disconnected", None), 1);
+    assert_eq!(exit_status_for(Some(0)), 0);
+    assert_eq!(exit_status_for(Some(7)), 7);
+    assert_eq!(exit_status_for(None), 1);
+    assert_eq!(exit_status_for(Some(999)), 1);
+    assert_eq!(exit_status_for(Some(-1)), 1);
+}
+
+/// Doc §8.5: the status the far end stated is the status, whatever the reason
+/// beside it says. A `disconnected` that carries `exitCode: 0` is a command
+/// that succeeded and a connection that then went away, and exiting non-zero
+/// would tell `ssh` the command failed.
+#[test]
+fn a_stated_status_outranks_the_reason_beside_it() {
+    let recorded = fixture("ssh.json");
+    let directory = TempDir::new("ssh-reason");
+    let ready = unhex(&strings(&recorded, "serverFrames")[0]);
+    let exit = encode_frame(
+        0x83,
+        json!({ "reason": "disconnected", "exitCode": 0 })
+            .to_string()
+            .as_bytes(),
+    );
+
+    let mut transport = ScriptedTransport::new(vec![(1, ready), (2, exit)]);
+    let mut stdio = ScriptedStdio::new(Vec::new());
+    let known_hosts = directory.path().join("known_hosts");
+    let outcome = sshproxy::run_ssh_proxy(
+        &mut transport,
+        &mut stdio,
+        &proxy_input(&recorded, &known_hosts, "svartal-fixture"),
+    )
+    .expect("a complete connection");
+    assert_eq!(outcome.reason, "disconnected");
+    assert_eq!(outcome.exit_code, 0);
 }
 
 /// stdin and stdout are pipes from `ssh`, not a terminal (doc §8.6).
@@ -601,7 +661,70 @@ fn a_length_past_the_ceiling_is_a_protocol_break() {
     let mut header = vec![0x82u8];
     header.extend_from_slice(&(sshproxy::MAX_FRAME_PAYLOAD as u32 + 1).to_be_bytes());
     let mut decoder = FrameDecoder::new();
-    assert!(decoder.push(&header).is_err());
+    // The break is recorded, and every push after it is refused.
+    assert!(decoder.push(&header).expect("nothing completed").is_empty());
+    assert!(decoder.broken().is_some());
+    assert!(decoder.push(b"anything at all").is_err());
+}
+
+/// A message that carries a good frame and then rubbish still delivers the
+/// good frame: the far end's own `EXIT` is the connection's answer, and losing
+/// it to the bytes that followed it would turn a clean status into a guess.
+#[test]
+fn the_frames_before_a_broken_header_are_still_delivered() {
+    let mut message = encode_frame(
+        0x83,
+        json!({ "reason": "sshd_exited", "exitCode": 3 })
+            .to_string()
+            .as_bytes(),
+    );
+    let mut garbage = vec![0x82u8];
+    garbage.extend_from_slice(&(sshproxy::MAX_FRAME_PAYLOAD as u32 + 1).to_be_bytes());
+    message.extend_from_slice(&garbage);
+
+    let mut decoder = FrameDecoder::new();
+    let frames = decoder.push(&message).expect("the EXIT was complete");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].kind, 0x83);
+    assert!(decoder.broken().is_some());
+
+    // And through the pump: the status is the `EXIT`'s, not a protocol error.
+    let recorded = fixture("ssh.json");
+    let directory = TempDir::new("ssh-broken-tail");
+    let ready = unhex(&strings(&recorded, "serverFrames")[0]);
+    let mut transport = ScriptedTransport::new(vec![(1, ready), (2, message)]);
+    let mut stdio = ScriptedStdio::new(Vec::new());
+    let known_hosts = directory.path().join("known_hosts");
+    let outcome = sshproxy::run_ssh_proxy(
+        &mut transport,
+        &mut stdio,
+        &proxy_input(&recorded, &known_hosts, "svartal-fixture"),
+    )
+    .expect("the EXIT ended the connection");
+    assert_eq!(outcome.reason, "sshd_exited");
+    assert_eq!(outcome.exit_code, 3);
+}
+
+/// The same rubbish with nothing complete before it is what it looks like: a
+/// protocol error, on stderr, with a status.
+#[test]
+fn a_broken_header_with_nothing_before_it_ends_the_connection() {
+    let recorded = fixture("ssh.json");
+    let directory = TempDir::new("ssh-broken");
+    let ready = unhex(&strings(&recorded, "serverFrames")[0]);
+    let mut garbage = vec![0x82u8];
+    garbage.extend_from_slice(&(sshproxy::MAX_FRAME_PAYLOAD as u32 + 1).to_be_bytes());
+
+    let mut transport = ScriptedTransport::new(vec![(1, ready), (2, garbage)]);
+    let mut stdio = ScriptedStdio::new(Vec::new());
+    let known_hosts = directory.path().join("known_hosts");
+    let error = sshproxy::run_ssh_proxy(
+        &mut transport,
+        &mut stdio,
+        &proxy_input(&recorded, &known_hosts, "svartal-fixture"),
+    )
+    .expect_err("a frame past the ceiling breaks the protocol");
+    assert!(error.to_string().contains("payload ceiling"), "{error}");
 }
 
 #[test]
@@ -657,6 +780,63 @@ fn an_alias_is_the_name_a_person_typed() {
         "svartal-weird-id-with-spaces"
     );
     assert_eq!(sshproxy::host_alias("***"), "svartal-workspace");
+}
+
+/// `READY.hostPublicKey` goes into `known_hosts`, and `known_hosts` is a file
+/// `ssh` trusts line by line. A value carrying a newline would let the far end
+/// write entries for hosts it has nothing to do with, so it is checked before
+/// it is used for anything.
+#[test]
+fn a_host_key_that_is_not_one_line_ends_the_connection() {
+    let injected = format!("{HOST_KEY}\ngithub.com {OTHER_HOST_KEY}");
+    for payload in [
+        injected.as_str(),
+        &format!("{HOST_KEY}\rgithub.com {OTHER_HOST_KEY}"),
+        "ssh-ed25519\tAAAAkey",
+        "ssh-ed25519",
+        "   ",
+        // Three is a key with a comment; four is not a key line.
+        &format!("{HOST_KEY} and more"),
+    ] {
+        let ready = json!({ "connectionId": "c1", "hostPublicKey": payload }).to_string();
+        let error = sshproxy::decode_ready(ready.as_bytes())
+            .expect_err(&format!("{payload:?} is not one host key line"));
+        assert!(
+            error.contains("hostPublicKey"),
+            "{payload:?} was refused with {error}"
+        );
+    }
+    // The good one still passes, comment and all.
+    assert_eq!(
+        sshproxy::decode_ready(
+            json!({ "connectionId": "c1", "hostPublicKey": format!("  {HOST_KEY}  ") })
+                .to_string()
+                .as_bytes()
+        )
+        .expect("a host key line")
+        .host_public_key,
+        HOST_KEY
+    );
+}
+
+/// The same check on the way in to the file, because the write is public and a
+/// second caller must not be able to walk past the frame's check.
+#[test]
+fn known_hosts_refuses_a_key_that_would_write_two_lines() {
+    let directory = TempDir::new("known-hosts-injection");
+    let path = directory.path().join("known_hosts");
+    sshproxy::write_known_host(
+        &path,
+        "svartal-web",
+        &format!("{HOST_KEY}\ngithub.com {HOST_KEY}"),
+    )
+    .expect_err("a key with a newline in it");
+    assert!(sshproxy::read_known_hosts(&path).is_empty());
+
+    // And a good one writes exactly one line.
+    sshproxy::write_known_host(&path, "svartal-web", HOST_KEY).expect("write");
+    let raw = std::fs::read_to_string(&path).expect("read");
+    assert_eq!(raw, format!("svartal-web {HOST_KEY}\n"));
 }
 
 #[test]
@@ -736,13 +916,89 @@ fn a_lock_its_holder_died_with_is_taken_over() {
     let directory = TempDir::new("known-hosts-stale");
     let path = directory.path().join("known_hosts");
     let lock = directory.path().join("known_hosts.lock");
-    std::fs::write(&lock, "").expect("lock");
+    std::fs::write(&lock, "another-process").expect("lock");
     // A lock file with an ancient mtime is a process that died holding it.
     let ancient = std::time::SystemTime::now() - Duration::from_secs(60);
     filetime_set(&lock, ancient);
     assert_eq!(
         sshproxy::write_known_host(&path, "svartal-web", HOST_KEY).expect("write"),
         KnownHostsChange::Added
+    );
+    // Taken over, used, and given back.
+    assert!(!lock.exists());
+}
+
+/// A lock that never frees means the edit is skipped, not forced: writing
+/// anyway is a read-modify-write racing whoever holds it, which is how an
+/// entry gets lost. The connection itself is unaffected — the block asks for
+/// `StrictHostKeyChecking accept-new` — so this is the cheaper miss.
+#[test]
+fn a_lock_that_never_frees_leaves_the_file_alone() {
+    let directory = TempDir::new("known-hosts-held");
+    let path = directory.path().join("known_hosts");
+    let lock = directory.path().join("known_hosts.lock");
+    std::fs::write(&lock, "another-process").expect("lock");
+    std::fs::write(&path, format!("svartal-web {OTHER_HOST_KEY}\n")).expect("seed");
+
+    assert_eq!(
+        sshproxy::write_known_host_within(
+            &path,
+            "svartal-web",
+            HOST_KEY,
+            Duration::from_millis(50)
+        )
+        .expect("a skipped edit is not a failure"),
+        KnownHostsChange::Unchanged
+    );
+    // Untouched: the entry that was there is the entry that is there, and the
+    // lock is still the other process's.
+    assert_eq!(
+        sshproxy::read_known_hosts(&path),
+        vec![format!("svartal-web {OTHER_HOST_KEY}")]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).expect("read"),
+        "another-process"
+    );
+}
+
+/// The stale-takeover race, from the other side. This process's own lock can
+/// be taken over while it holds it — that is what `LOCK_STALE` is for — and
+/// from that moment the file belongs to whoever took it. Releasing has to
+/// notice, or it deletes a lock a second process is holding and lets a third
+/// one in on top of both.
+#[test]
+fn releasing_a_lock_someone_else_took_over_leaves_it_alone() {
+    let directory = TempDir::new("known-hosts-token");
+    let lock = directory.path().join("known_hosts.lock");
+
+    let held = sshproxy::KnownHostsLock::take(&lock, Duration::from_millis(50))
+        .expect("the lock is free")
+        .expect("taken");
+    // The file says which process holds it.
+    let token = std::fs::read_to_string(&lock).expect("read");
+    assert!(
+        token.starts_with(&format!("{}-", std::process::id())),
+        "{token}"
+    );
+    // Nobody else can take it while it is held and fresh.
+    assert!(
+        sshproxy::KnownHostsLock::take(&lock, Duration::from_millis(50))
+            .expect("no error")
+            .is_none()
+    );
+    drop(held);
+    assert!(!lock.exists());
+
+    // Now the other order: taken over while this process held it.
+    let held = sshproxy::KnownHostsLock::take(&lock, Duration::from_millis(50))
+        .expect("the lock is free")
+        .expect("taken");
+    std::fs::write(&lock, "a-second-process").expect("take over");
+    drop(held);
+    assert_eq!(
+        std::fs::read_to_string(&lock).expect("read"),
+        "a-second-process"
     );
 }
 
@@ -840,6 +1096,92 @@ fn a_config_file_is_created_owner_only() {
     );
 }
 
+/// A `~/.ssh/config` that is a symlink into a dotfiles checkout is an ordinary
+/// thing to have. The block goes into the file the link points at, and the link
+/// is still a link afterwards — writing a new file and renaming it over the top
+/// would silently take the file out of the person's repository.
+#[test]
+fn a_symlinked_config_is_followed_rather_than_replaced() {
+    let directory = TempDir::new("ssh-config-symlink");
+    let checkout = directory.path().join("dotfiles");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    let real = checkout.join("ssh_config");
+    std::fs::write(&real, "Host build\n  HostName build.example.com\n").expect("seed");
+    let link = directory.path().join("config");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    let block = sshproxy::ssh_config_block(&ConfigBlockInput {
+        alias: "svartal-web",
+        target: "web",
+        binary: "sv",
+        identity_file: "/keys/id_ed25519",
+        known_hosts_file: "/keys/known_hosts",
+    });
+    assert_eq!(
+        sshproxy::apply_ssh_config_block(&link, "svartal-web", &block).expect("apply"),
+        sshproxy::ConfigChange::Added
+    );
+
+    let written = std::fs::read_to_string(&real).expect("the target holds the block");
+    assert!(written.contains("Host svartal-web"), "{written}");
+    assert!(written.contains("Host build"), "{written}");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("stat")
+            .file_type()
+            .is_symlink(),
+        "the link is still a link"
+    );
+}
+
+/// The file is the person's, so its mode is theirs too. A `0644` config is
+/// unusual and not this CLI's business; only a file it creates is `0600`.
+#[test]
+fn an_existing_config_keeps_the_mode_it_had() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = TempDir::new("ssh-config-mode");
+    let path = directory.path().join("config");
+    std::fs::write(&path, "Host build\n").expect("seed");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+    let block = sshproxy::ssh_config_block(&ConfigBlockInput {
+        alias: "svartal-web",
+        target: "web",
+        binary: "sv",
+        identity_file: "/keys/id_ed25519",
+        known_hosts_file: "/keys/known_hosts",
+    });
+    sshproxy::apply_ssh_config_block(&path, "svartal-web", &block).expect("apply");
+    assert_eq!(
+        std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777,
+        0o644
+    );
+}
+
+/// And a `~/.ssh` that is itself a symlink is a directory like any other.
+#[test]
+fn a_symlinked_ssh_directory_is_written_into() {
+    let directory = TempDir::new("ssh-config-linked-dir");
+    let real = directory.path().join("dotfiles-ssh");
+    std::fs::create_dir_all(&real).expect("directory");
+    let linked = directory.path().join(".ssh");
+    std::os::unix::fs::symlink(&real, &linked).expect("symlink");
+
+    let block = sshproxy::ssh_config_block(&ConfigBlockInput {
+        alias: "svartal-web",
+        target: "web",
+        binary: "sv",
+        identity_file: "/keys/id_ed25519",
+        known_hosts_file: "/keys/known_hosts",
+    });
+    assert_eq!(
+        sshproxy::apply_ssh_config_block(&linked.join("config"), "svartal-web", &block)
+            .expect("apply"),
+        sshproxy::ConfigChange::Created
+    );
+    assert!(real.join("config").exists());
+}
+
 #[test]
 fn a_path_with_a_space_is_quoted() {
     let block = sshproxy::ssh_config_block(&ConfigBlockInput {
@@ -924,6 +1266,12 @@ fn ssh_setup_writes_the_key_and_the_block() {
         )),
         "{written}"
     );
+    // The `ProxyCommand` carries the word that resolves, verbatim.
+    assert!(
+        written.contains("ProxyCommand /usr/local/bin/sv ssh-proxy web"),
+        "{written}"
+    );
+    // And the sentence names what was written: the file, the host, the target.
     assert_eq!(
         sshproxy::describe_ssh_setup(&outcome),
         vec![
@@ -932,7 +1280,7 @@ fn ssh_setup_writes_the_key_and_the_block() {
                 sshproxy::client_key_path(state.path()).display()
             ),
             format!(
-                "Wrote {}. Connect with `ssh svartal-web`.",
+                "Wrote {}. `ssh svartal-web` reaches web.",
                 config_path.display()
             ),
         ]
@@ -988,6 +1336,179 @@ fn ssh_setup_reset_hosts_forgets_only_this_alias() {
     );
 }
 
+// -- the word the ProxyCommand carries -------------------------------------
+
+/// One machine, one workspace, and a display name nobody could resolve: a
+/// label with a space and a capital in it.
+fn spaced_machines() -> Value {
+    json!({
+        "data": [{
+            "id": "machine-1",
+            "name": "workbench",
+            "origin": "donated",
+            "lifecycleState": "open",
+            "presence": "online",
+            "lastSeenAt": null,
+            "environments": [
+                { "id": "row-1", "environmentId": "env-9f3c", "label": "My Box", "kind": "personal", "lifecycleState": "active" },
+            ],
+        }],
+    })
+}
+
+fn spaced_links() -> Value {
+    json!({
+        "environments": [{
+            "environmentId": "env-9f3c",
+            "label": "My Box",
+            "endpoint": {
+                "httpBaseUrl": "https://workspace.example.test",
+                "wsBaseUrl": "wss://workspace.example.test/ws",
+                "providerKind": "cloudflare_tunnel",
+            },
+            "linkedAt": "2026-08-01T10:00:00Z",
+        }],
+    })
+}
+
+fn spaced_view() -> svartal::view::MachinesView {
+    let machines: Vec<svartal::api::Machine> =
+        serde_json::from_value(spaced_machines()["data"].clone()).expect("machines");
+    let links: Vec<svartal::api::LinkRecord> =
+        serde_json::from_value(spaced_links()["environments"].clone()).expect("links");
+    svartal::view::build_machines_view(&machines, &links)
+}
+
+/// Run `sv ssh-setup <target>` against that machine, in a throwaway home, and
+/// hand back what landed in `~/.ssh/config`.
+fn run_ssh_setup_command(
+    tag: &str,
+    target: &str,
+    names: &svartal::shortnames::Shortnames,
+) -> String {
+    let recorded = fixture("oidc.json");
+    let state = TempDir::new(&format!("{tag}-state"));
+    let home = TempDir::new(&format!("{tag}-home"));
+    svartal::shortnames::write_shortnames(state.path(), names).expect("names");
+
+    let issuer = recorded["issuer"].as_str().expect("issuer").to_string();
+    let relay = recorded["relayUrl"].as_str().expect("relay").to_string();
+    let routed = recorded.clone();
+    let http = common::FakeTransport::new(move |request| {
+        let url = request.url.as_str();
+        if url == format!("{issuer}/.well-known/openid-configuration") {
+            return common::json_response(200, &routed["discovery"]);
+        }
+        if url == format!("{issuer}/.well-known/jwks.json") {
+            return common::json_response(200, &routed["jwks"]);
+        }
+        if url == format!("{issuer}/api/v1/client/machines") {
+            return common::json_response(200, &spaced_machines());
+        }
+        if url == format!("{relay}/v1/environments") {
+            return common::json_response(200, &spaced_links());
+        }
+        common::json_response(404, &json!({ "error": "unexpected" }))
+    });
+
+    let storage =
+        svartal::store::MemoryTokenStorage::with_value(&recorded["storedTokens"].to_string());
+    let environment: svartal::config::Environment = [
+        (
+            "HOME".to_string(),
+            home.path().to_string_lossy().to_string(),
+        ),
+        (
+            "SVARTAL_CONFIG_DIR".to_string(),
+            state.path().to_string_lossy().to_string(),
+        ),
+        (
+            "SVARTAL_ISSUER".to_string(),
+            recorded["issuer"].as_str().expect("issuer").to_string(),
+        ),
+        (
+            "SVARTAL_RELAY_URL".to_string(),
+            recorded["relayUrl"].as_str().expect("relay").to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let now = recorded["nowEpochMs"].as_i64().expect("now");
+    let clock = move || now;
+    let browser = svartal::browser::NoBrowser;
+    let context = svartal::commands::Context {
+        config: svartal::config::resolve_config(&environment).expect("config"),
+        http: &http,
+        storage: &storage,
+        browser: &browser,
+        now: &clock,
+    };
+
+    let mut out: Vec<u8> = Vec::new();
+    svartal::commands::ssh_setup(&context, &mut out, &environment, target, false, false)
+        .expect("ssh-setup");
+    std::fs::read_to_string(home.path().join(".ssh").join("config")).expect("the block")
+}
+
+/// The word in the `ProxyCommand` is handed straight back to `sv ssh-proxy`
+/// with no other context, so it has to resolve on its own. A sanitized display
+/// name does not: `my-box` is not this workspace's id, its short name, or its
+/// label, and `ssh svartal-my-box` would have failed at the first byte.
+#[test]
+fn a_target_with_no_short_name_gets_a_proxy_command_that_resolves() {
+    let block = run_ssh_setup_command(
+        "ssh-setup-spaced",
+        "My Box",
+        &svartal::shortnames::Shortnames::new(),
+    );
+    let token = proxy_command_target(&block);
+    assert_eq!(token, "env-9f3c");
+    assert!(block.contains("Host svartal-env-9f3c"), "{block}");
+
+    // The claim, checked against the machinery that has to honour it.
+    let view = spaced_view();
+    let names = svartal::shortnames::Shortnames::new();
+    assert_eq!(
+        svartal::target::select_shell_target(&view, &names, &token)
+            .expect("the written token resolves")
+            .environment_id,
+        "env-9f3c"
+    );
+    // And the token this used to write does not.
+    assert!(
+        svartal::target::select_shell_target(&view, &names, &sshproxy::alias_token("My Box"))
+            .is_err(),
+        "a sanitized display name is not a target"
+    );
+}
+
+/// With a short name recorded, that is the word: the person chose it, it
+/// resolves, and it is what makes the host alias readable.
+#[test]
+fn a_recorded_short_name_is_the_word_the_proxy_command_carries() {
+    let mut names = svartal::shortnames::Shortnames::new();
+    names.assign("box", "env-9f3c").expect("name");
+    let block = run_ssh_setup_command("ssh-setup-named", "My Box", &names);
+    assert_eq!(proxy_command_target(&block), "box");
+    assert!(block.contains("Host svartal-box"), "{block}");
+    assert_eq!(
+        svartal::target::select_shell_target(&spaced_view(), &names, "box")
+            .expect("the written token resolves")
+            .environment_id,
+        "env-9f3c"
+    );
+}
+
+/// The `<target>` out of the block's `ProxyCommand` line.
+fn proxy_command_target(block: &str) -> String {
+    block
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("ProxyCommand "))
+        .and_then(|line| line.split(" ssh-proxy ").nth(1))
+        .map(|target| target.trim().trim_matches('"').to_string())
+        .unwrap_or_else(|| panic!("no ProxyCommand line in {block}"))
+}
+
 #[test]
 fn the_ssh_config_path_comes_from_the_home_directory() {
     let mut environment = svartal::config::Environment::new();
@@ -998,4 +1519,282 @@ fn the_ssh_config_path_comes_from_the_home_directory() {
     );
     let empty = svartal::config::Environment::new();
     assert!(sshproxy::default_ssh_config_path(&empty).is_err());
+}
+
+/// The `ProxyCommand` names the `sv` this command was *invoked* as, symlinks
+/// and all. Resolving them would bake a Homebrew Cellar path — one that the
+/// next `brew upgrade` deletes — into a file that outlives the upgrade.
+#[test]
+fn the_proxy_command_keeps_the_binary_the_person_invoked() {
+    let cwd = Path::new("/home/person/work");
+    // On `PATH`: written as it was typed, because `ssh` finds it the same way.
+    assert_eq!(sshproxy::binary_path_of(Some("sv"), Some(cwd)), "sv");
+    // Absolute: already the answer, links included.
+    assert_eq!(
+        sshproxy::binary_path_of(Some("/opt/homebrew/bin/sv"), Some(cwd)),
+        "/opt/homebrew/bin/sv"
+    );
+    // Relative: `ssh` runs from a working directory of its own, so it is made
+    // absolute against this one.
+    assert_eq!(
+        sshproxy::binary_path_of(Some("./target/debug/sv"), Some(cwd)),
+        "/home/person/work/target/debug/sv"
+    );
+    assert_eq!(
+        sshproxy::binary_path_of(Some("../sv"), Some(cwd)),
+        "/home/person/sv"
+    );
+    // Nothing to go on.
+    assert_eq!(sshproxy::binary_path_of(None, Some(cwd)), "sv");
+    assert_eq!(sshproxy::binary_path_of(Some("  "), Some(cwd)), "sv");
+    // And the real one is at least a usable word.
+    assert!(!sshproxy::invoked_binary_path().trim().is_empty());
+}
+
+// -- the routes ------------------------------------------------------------
+
+/// The ssh bridge hangs off the workspace's HTTP base URL, never off the ws
+/// one: the relay mints `wsBaseUrl` as the `/ws` endpoint itself, and
+/// `wss://<host>/ws/ssh` is a route no workspace serves.
+#[test]
+fn the_ssh_route_never_lands_under_the_ws_endpoint() {
+    let ticket = "ws-ticket";
+    assert_eq!(
+        svartal::workspace::websocket_route_url("https://box.example.com", "/ssh", ticket)
+            .expect("url"),
+        "wss://box.example.com/ssh?wsTicket=ws-ticket"
+    );
+    // A workspace published under a path prefix keeps it, with the route under.
+    assert_eq!(
+        svartal::workspace::websocket_route_url(
+            "https://edge.example.com/env/9f3c/",
+            "/ssh",
+            ticket
+        )
+        .expect("url"),
+        "wss://edge.example.com/env/9f3c/ssh?wsTicket=ws-ticket"
+    );
+    // Plain http is a ws socket, not a wss one.
+    assert_eq!(
+        svartal::workspace::websocket_route_url("http://127.0.0.1:3773", "/ssh", ticket)
+            .expect("url"),
+        "ws://127.0.0.1:3773/ssh?wsTicket=ws-ticket"
+    );
+}
+
+/// The same rule where it bites: the relay's connect response carries a
+/// `wsBaseUrl` that already ends in `/ws`, and the ssh socket URL must not
+/// become `/ws/ssh` because of it.
+#[test]
+fn the_relay_ws_endpoint_never_shapes_the_ssh_socket_url() {
+    for (http_base, expected) in [
+        (
+            "https://workspace.example.com",
+            "wss://workspace.example.com/ssh?wsTicket=ws-ticket-ssh-fixture",
+        ),
+        (
+            "https://edge.example.com/env/9f3c",
+            "wss://edge.example.com/env/9f3c/ssh?wsTicket=ws-ticket-ssh-fixture",
+        ),
+    ] {
+        let socket_url = connect_with_endpoint(http_base, &format!("{http_base}/ws"));
+        assert_eq!(socket_url, expected);
+        assert!(!socket_url.contains("/ws/ssh"), "{socket_url}");
+    }
+}
+
+/// The connect chain, run against one endpoint answer.
+fn connect_with_endpoint(http_base: &str, ws_base: &str) -> String {
+    let recorded = fixture("ssh.json");
+    let jwk: PrivateJwk = serde_json::from_value(recorded["privateJwk"].clone()).expect("jwk");
+    let key = DpopKey::from_private_jwk(&jwk).expect("key");
+    let relay = recorded["relayUrl"].as_str().expect("relay").to_string();
+    let environment_id = recorded["environmentId"]
+        .as_str()
+        .expect("environment")
+        .to_string();
+    let (endpoint_http, endpoint_ws) = (http_base.to_string(), ws_base.to_string());
+    let http = common::FakeTransport::new(move |request| {
+        let url = request.url.as_str();
+        if url == format!("{relay}/v1/environments/{environment_id}/connect") {
+            return common::json_response(
+                200,
+                &json!({
+                    "environmentId": environment_id,
+                    "endpoint": {
+                        "httpBaseUrl": endpoint_http,
+                        "wsBaseUrl": endpoint_ws,
+                        "providerKind": "cloudflare_tunnel",
+                    },
+                    "credential": "environment-credential",
+                    "expiresAt": "2026-08-19T12:05:00.000Z",
+                }),
+            );
+        }
+        if url.ends_with("/api/auth/websocket-ticket") {
+            return common::json_response(
+                200,
+                &json!({ "ticket": "ws-ticket-ssh-fixture", "expiresAt": "2026-08-19T12:05:00.000Z" }),
+            );
+        }
+        common::json_response(
+            200,
+            &json!({
+                "access_token": "an-access-token",
+                "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "token_type": "DPoP",
+                "expires_in": 300,
+                "scope": "terminal:operate",
+            }),
+        )
+    });
+
+    let target = svartal::target::ShellTarget {
+        environment_id: recorded["environmentId"]
+            .as_str()
+            .expect("environment")
+            .to_string(),
+        label: "Primary".to_string(),
+        machine_name: None,
+        linked: true,
+        machine_presence: Some("unknown".to_string()),
+    };
+    sshproxy::connect_bridge(
+        &http,
+        &sshproxy::BridgeConnectInput {
+            relay_url: recorded["relayUrl"].as_str().expect("relay"),
+            client_id: "svartal-cli",
+            access_token: "oidc-access-token",
+            target: &target,
+            dpop_key: &key,
+            client_metadata: svartal::workspace::CLI_CLIENT_METADATA,
+        },
+    )
+    .expect("the connect chain")
+}
+
+/// And the RPC route keeps its own rule: `/ws` only when the base URL carries
+/// no path of its own, and a base URL that carries one is left alone.
+#[test]
+fn the_rpc_route_leaves_a_path_carrying_base_url_alone() {
+    assert_eq!(
+        svartal::workspace::websocket_url("wss://box.example.com", "t").expect("url"),
+        "wss://box.example.com/ws?wsTicket=t"
+    );
+    assert_eq!(
+        svartal::workspace::websocket_url("wss://box.example.com/", "t").expect("url"),
+        "wss://box.example.com/ws?wsTicket=t"
+    );
+    assert_eq!(
+        svartal::workspace::websocket_url("wss://box.example.com/ws", "t").expect("url"),
+        "wss://box.example.com/ws?wsTicket=t"
+    );
+    assert_eq!(
+        svartal::workspace::websocket_url("wss://edge.example.com/env/9f3c/ws", "t").expect("url"),
+        "wss://edge.example.com/env/9f3c/ws?wsTicket=t"
+    );
+}
+
+// -- what the pump does with a broken far end ------------------------------
+
+/// `ssh-bridge.md` §2: the bridge is binary. A text message is the far end
+/// breaking the contract, and it reads as that — on stderr, with a status —
+/// rather than as a connection that quietly went away.
+#[test]
+fn a_text_message_is_a_protocol_error() {
+    let recorded = fixture("ssh.json");
+    let directory = TempDir::new("ssh-text");
+    let ready = unhex(&strings(&recorded, "serverFrames")[0]);
+    let mut transport = TalkingTransport {
+        inner: ScriptedTransport::new(vec![(1, ready)]),
+        text_after: 1,
+    };
+    let mut stdio = ScriptedStdio::new(Vec::new());
+    let known_hosts = directory.path().join("known_hosts");
+    let error = sshproxy::run_ssh_proxy(
+        &mut transport,
+        &mut stdio,
+        &proxy_input(&recorded, &known_hosts, "svartal-fixture"),
+    )
+    .expect_err("a text message breaks the protocol");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "The ssh bridge on {} broke the protocol: a text message",
+            recorded["target"]["label"].as_str().expect("label")
+        )
+    );
+}
+
+/// The scripted transport, with a text message after the script runs out.
+struct TalkingTransport {
+    inner: ScriptedTransport,
+    text_after: usize,
+}
+
+impl BinaryTransport for TalkingTransport {
+    fn recv(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, TransportError> {
+        match self.inner.recv(timeout)? {
+            Some(message) => Ok(Some(message)),
+            None if self.inner.sent.len() >= self.text_after => Err(TransportError::Protocol(
+                svartal::ws::TEXT_ON_THE_SSH_BRIDGE.to_string(),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    fn send(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        self.inner.send(bytes)
+    }
+}
+
+/// stdout is the SSH transport. A write that fails is bytes the far end
+/// believes it delivered and `ssh` never saw, so the connection ends rather
+/// than carrying on writing into a pipe nobody is reading.
+#[test]
+fn output_that_cannot_be_written_ends_the_connection() {
+    let recorded = fixture("ssh.json");
+    let directory = TempDir::new("ssh-broken-stdout");
+    let ready = unhex(&strings(&recorded, "serverFrames")[0]);
+    let output = encode_frame(0x82, b"a banner nobody will read");
+
+    let mut transport = ScriptedTransport::new(vec![(1, ready), (1, output)]);
+    let mut stdio = BrokenStdout::new();
+    let known_hosts = directory.path().join("known_hosts");
+    let outcome = sshproxy::run_ssh_proxy(
+        &mut transport,
+        &mut stdio,
+        &proxy_input(&recorded, &known_hosts, "svartal-fixture"),
+    )
+    .expect("an ended connection is an answer");
+    assert_eq!(outcome.reason, sshproxy::STDOUT_GONE_REASON);
+    assert_ne!(outcome.exit_code, 0);
+}
+
+/// Unless the same message carried the status: an `EXIT` that arrived with the
+/// output is the connection's own answer and outranks the local failure.
+#[test]
+fn a_status_in_the_same_message_still_wins() {
+    let recorded = fixture("ssh.json");
+    let directory = TempDir::new("ssh-broken-stdout-exit");
+    let ready = unhex(&strings(&recorded, "serverFrames")[0]);
+    let mut message = encode_frame(0x82, b"output");
+    message.extend_from_slice(&encode_frame(
+        0x83,
+        json!({ "reason": "sshd_exited", "exitCode": 0 })
+            .to_string()
+            .as_bytes(),
+    ));
+
+    let mut transport = ScriptedTransport::new(vec![(1, ready), (1, message)]);
+    let mut stdio = BrokenStdout::new();
+    let known_hosts = directory.path().join("known_hosts");
+    let outcome = sshproxy::run_ssh_proxy(
+        &mut transport,
+        &mut stdio,
+        &proxy_input(&recorded, &known_hosts, "svartal-fixture"),
+    )
+    .expect("a complete connection");
+    assert_eq!(outcome.reason, "sshd_exited");
+    assert_eq!(outcome.exit_code, 0);
 }

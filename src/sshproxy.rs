@@ -201,6 +201,7 @@ pub fn encode_open_frame(public_key: &str, client_name: Option<&str>) -> Vec<u8>
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
     pending: Vec<u8>,
+    broken: Option<String>,
 }
 
 impl FrameDecoder {
@@ -213,9 +214,21 @@ impl FrameDecoder {
         self.pending.len()
     }
 
-    /// `Err` is a peer that broke the framing; the frames that were complete
-    /// before it are lost with it, because the connection ends either way.
+    /// Why the framing broke, once it has.
+    ///
+    /// The frames that were already complete are still delivered by the `push`
+    /// that found the break — an `EXIT` the far end sent before it started
+    /// writing rubbish is the connection's own answer and is worth more than
+    /// the rubbish that followed it — and every push after that one is refused.
+    pub fn broken(&self) -> Option<&str> {
+        self.broken.as_deref()
+    }
+
+    /// The frames this chunk completed. `Err` is a decoder that already broke.
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Frame>, String> {
+        if let Some(detail) = &self.broken {
+            return Err(detail.clone());
+        }
         self.pending.extend_from_slice(chunk);
         let mut frames = Vec::new();
         let mut offset = 0;
@@ -225,8 +238,9 @@ impl FrameDecoder {
             if length > MAX_FRAME_PAYLOAD {
                 // Stop before allocating anything: the peer is either broken or
                 // not speaking this protocol, and both are the same answer.
-                self.pending.clear();
-                return Err("a frame larger than the protocol's payload ceiling".to_string());
+                self.broken =
+                    Some("a frame larger than the protocol's payload ceiling".to_string());
+                break;
             }
             let end = offset + FRAME_HEADER_BYTES + length;
             if self.pending.len() < end {
@@ -238,7 +252,9 @@ impl FrameDecoder {
             });
             offset = end;
         }
-        if offset > 0 {
+        if self.broken.is_some() {
+            self.pending.clear();
+        } else if offset > 0 {
             self.pending.drain(..offset);
         }
         Ok(frames)
@@ -268,12 +284,41 @@ fn trimmed_string(value: Option<&Value>, field: &str) -> Result<String, String> 
     Ok(text.to_string())
 }
 
+/// One OpenSSH public key line, checked before it is used for anything.
+///
+/// `READY.hostPublicKey` is written into `known_hosts`, and `known_hosts` is a
+/// line-oriented file `ssh` trusts absolutely: a value carrying a newline would
+/// let the far end append entries of its own choosing — a key for `github.com`,
+/// for any host at all — to the file this person's ssh client checks every host
+/// against. So the value has to be one line of two or three plain tokens
+/// (`type key [comment]`) before anything touches it, and a value that is not
+/// ends the connection.
+pub fn checked_host_public_key(value: &str) -> Result<String, String> {
+    let key = value.trim();
+    if key.is_empty() {
+        return Err("hostPublicKey is missing".to_string());
+    }
+    if key.chars().any(char::is_control) {
+        return Err("a hostPublicKey with a control character in it".to_string());
+    }
+    let tokens: Vec<&str> = key.split(' ').collect();
+    if !(2..=3).contains(&tokens.len()) || tokens.iter().any(|token| token.is_empty()) {
+        return Err("a hostPublicKey that is not one ssh public key line".to_string());
+    }
+    Ok(key.to_string())
+}
+
 pub fn decode_ready(payload: &[u8]) -> Result<Ready, String> {
     let value: Value = serde_json::from_slice(payload)
         .map_err(|error| format!("a READY frame this client cannot read: {error}"))?;
     Ok(Ready {
         connection_id: trimmed_string(value.get("connectionId"), "connectionId")?,
-        host_public_key: trimmed_string(value.get("hostPublicKey"), "hostPublicKey")?,
+        host_public_key: checked_host_public_key(
+            value
+                .get("hostPublicKey")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )?,
     })
 }
 
@@ -295,14 +340,13 @@ pub fn decode_exit(payload: &[u8]) -> Result<ExitFrame, String> {
 
 /// The status this process exits with (doc §8.5).
 ///
-/// `EXIT.exitCode` when it is a usable one, a non-zero status otherwise: a
-/// connection killed by a signal, torn down by the server, or refused for a
-/// protocol reason did not succeed, and `ssh` has nowhere else to learn that
-/// from.
-pub fn exit_status_for(reason: &str, exit_code: Option<i64>) -> i32 {
-    if reason != "sshd_exited" {
-        return GENERIC_EXIT_CODE;
-    }
+/// `EXIT.exitCode` whenever it is a usable process status, whatever the reason
+/// beside it says: the reason names *why* the connection ended, and a workspace
+/// that reports `disconnected` with `exitCode: 0` is reporting a command that
+/// succeeded. Anything else — no status at all, or one outside a process
+/// status's range — is non-zero, because a connection that ended without a
+/// status did not succeed and `ssh` has nowhere else to learn that from.
+pub fn exit_status_for(exit_code: Option<i64>) -> i32 {
     match exit_code {
         Some(code) if (0..=255).contains(&code) => code as i32,
         _ => GENERIC_EXIT_CODE,
@@ -324,7 +368,12 @@ pub enum InputPoll {
 pub trait ProxyStdio {
     fn take_input(&mut self) -> InputPoll;
     /// Payload bytes to stdout. Nothing else is ever written there.
-    fn write(&mut self, bytes: &[u8]);
+    ///
+    /// A failure here is the end of the connection, not something to swallow:
+    /// stdout is the SSH transport, and output that never arrived is a
+    /// transport that lost bytes. The caller ends the connection rather than
+    /// letting `ssh` read a truncated stream as a good one.
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()>;
     /// A descriptor that becomes readable when `take_input` has something.
     fn ready_fd(&self) -> Option<RawFd> {
         None
@@ -427,10 +476,10 @@ impl ProxyStdio for ProcessStdio {
         }
     }
 
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let mut stdout = std::io::stdout();
-        let _ = stdout.write_all(bytes);
-        let _ = stdout.flush();
+        stdout.write_all(bytes)?;
+        stdout.flush()
     }
 
     fn ready_fd(&self) -> Option<RawFd> {
@@ -518,6 +567,9 @@ pub fn run_ssh_proxy<T: BinaryTransport>(
 
         let message = match transport.recv(socket_wait) {
             Ok(message) => message,
+            // The far end breaking the wire contract is not a connection that
+            // ended: it gets the protocol sentence, on stderr, and a status.
+            Err(TransportError::Protocol(detail)) => return Err(protocol_error(label, detail)),
             // Doc §3.5: a connection that dies before `EXIT` carries no frame at
             // all, and a closed socket is an ended connection.
             Err(error) => return Ok(ended_by(&error, ready.as_ref())),
@@ -526,6 +578,7 @@ pub fn run_ssh_proxy<T: BinaryTransport>(
             let frames = decoder
                 .push(&bytes)
                 .map_err(|detail| protocol_error(label, detail))?;
+            let mut stdout_gone = false;
             for frame in frames {
                 match frame.kind {
                     FRAME_READY => {
@@ -550,8 +603,18 @@ pub fn run_ssh_proxy<T: BinaryTransport>(
                         if ready.is_none() {
                             return Err(protocol_error(label, "a STDOUT frame before READY"));
                         }
-                        if !frame.payload.is_empty() {
-                            stdio.write(&frame.payload);
+                        if !frame.payload.is_empty()
+                            && !stdout_gone
+                            && let Err(error) = stdio.write(&frame.payload)
+                        {
+                            // The only place a write failure can be reported.
+                            // Said once, and then the connection ends: `ssh`
+                            // reading a truncated transport as a good one is
+                            // worse than losing the connection.
+                            diagnose(&format!(
+                                "sv: could not hand the workspace's output to ssh: {error}"
+                            ));
+                            stdout_gone = true;
                         }
                     }
                     FRAME_EXIT => {
@@ -565,7 +628,7 @@ pub fn run_ssh_proxy<T: BinaryTransport>(
                             }
                         });
                         return Ok(SshOutcome {
-                            exit_code: exit_status_for(&decoded.reason, decoded.exit_code),
+                            exit_code: exit_status_for(decoded.exit_code),
                             reason: decoded.reason,
                             connection_id: ready.map(|value| value.connection_id),
                         });
@@ -575,6 +638,18 @@ pub fn run_ssh_proxy<T: BinaryTransport>(
                     // break a live SSH transport.
                     _ => {}
                 }
+            }
+            // Both are decided after the whole message has been read, so an
+            // `EXIT` that arrived in it is still the connection's own answer.
+            if stdout_gone {
+                return Ok(SshOutcome {
+                    reason: STDOUT_GONE_REASON.to_string(),
+                    exit_code: GENERIC_EXIT_CODE,
+                    connection_id: ready.as_ref().map(|value| value.connection_id.clone()),
+                });
+            }
+            if let Some(detail) = decoder.broken() {
+                return Err(protocol_error(label, detail));
             }
         }
 
@@ -602,6 +677,10 @@ pub fn run_ssh_proxy<T: BinaryTransport>(
     }
 }
 
+/// How a connection this client ended reports itself, when the local end of the
+/// transport — the pipe `ssh` reads — stopped taking bytes.
+pub const STDOUT_GONE_REASON: &str = "stdout_closed";
+
 /// A socket that ended without an `EXIT` frame. Non-zero, always: `ssh` has
 /// nothing else to read the failure from.
 fn ended_by(error: &TransportError, ready: Option<&Ready>) -> SshOutcome {
@@ -609,6 +688,9 @@ fn ended_by(error: &TransportError, ready: Option<&Ready>) -> SshOutcome {
         reason: match error {
             TransportError::Closed(_) => "closed".to_string(),
             TransportError::Failed(_) => "client_gone".to_string(),
+            // The pump answers this one before it gets here; a transport that
+            // reports it on `send` still ends the connection.
+            TransportError::Protocol(_) => "protocol_error".to_string(),
         },
         exit_code: GENERIC_EXIT_CODE,
         connection_id: ready.map(|value| value.connection_id.clone()),
@@ -676,13 +758,11 @@ pub fn connect_bridge(
     )
     .map_err(|error| connect_error(label, error))?;
 
+    // The endpoint's `wsBaseUrl` is deliberately unused here: the relay mints
+    // it as the RPC endpoint itself (`wss://<host>/ws`), so the ssh route is
+    // built from the workspace's HTTP base URL instead. See
+    // `workspace::websocket_route_url`.
     let http_base_url = connection.endpoint.http_base_url.clone();
-    let ws_base_url = if connection.endpoint.ws_base_url.trim().is_empty() {
-        workspace::default_ws_base_url(&http_base_url)
-            .map_err(|error| connect_error(label, error))?
-    } else {
-        connection.endpoint.ws_base_url.clone()
-    };
 
     let token_url =
         workspace::token_url(&http_base_url).map_err(|error| connect_error(label, error))?;
@@ -718,7 +798,7 @@ pub fn connect_bridge(
     )
     .map_err(|error| connect_error(label, error))?;
 
-    workspace::websocket_url_at(&ws_base_url, SSH_ROUTE_PATH, &ticket.ticket)
+    workspace::websocket_route_url(&http_base_url, SSH_ROUTE_PATH, &ticket.ticket)
         .map_err(|error| connect_error(label, error))
 }
 
@@ -944,8 +1024,24 @@ pub fn write_known_host(
     alias: &str,
     host_public_key: &str,
 ) -> Result<KnownHostsChange, String> {
-    let line = format!("{alias} {}", host_public_key.trim());
-    with_known_hosts_lock(path, || {
+    write_known_host_within(path, alias, host_public_key, LOCK_WAIT)
+}
+
+/// The same write, with the lock wait stated.
+///
+/// `write_known_host` is this with the five-second wait a `ProxyCommand` uses.
+/// A test states a short one so it can pin what happens when the lock never
+/// frees without sitting through the real wait.
+pub fn write_known_host_within(
+    path: &Path,
+    alias: &str,
+    host_public_key: &str,
+    lock_wait: Duration,
+) -> Result<KnownHostsChange, String> {
+    // Checked here too, not only on the frame: this function writes a line into
+    // a file `ssh` trusts, and it is public.
+    let line = format!("{alias} {}", checked_host_public_key(host_public_key)?);
+    with_known_hosts_lock(path, lock_wait, || {
         let existing = read_known_hosts(path);
         let mine: Vec<&String> = existing
             .iter()
@@ -971,7 +1067,7 @@ pub fn write_known_host(
 
 /// Forget every host key recorded for an alias. `sv ssh-setup --reset-hosts`.
 pub fn remove_known_host(path: &Path, alias: &str) -> Result<KnownHostsChange, String> {
-    with_known_hosts_lock(path, || {
+    with_known_hosts_lock(path, LOCK_WAIT, || {
         let existing = read_known_hosts(path);
         let lines: Vec<String> = existing
             .iter()
@@ -995,63 +1091,123 @@ fn write_lines(path: &Path, lines: &[String]) -> Result<(), String> {
     crate::fsutil::write_private_file(path, body.as_bytes()).map_err(|error| error.to_string())
 }
 
-/// Hold an exclusive lock over `known_hosts` for one read-modify-write.
-///
-/// An `O_EXCL` lock file, not `flock(2)`: the TypeScript `sv` and this one have
-/// to exclude *each other*, Node has no portable `flock`, and this is the
-/// mechanism both can implement the same way on every Unix. A lock older than
-/// `LOCK_STALE` belonged to a process that died holding it and is taken over; a
-/// lock that never frees is reported on stderr and the edit proceeds anyway,
-/// because refusing it would cost the person the connection.
-fn with_known_hosts_lock<A>(
-    path: &Path,
-    edit: impl FnOnce() -> Result<A, String>,
-) -> Result<A, String> {
-    if let Some(parent) = path.parent() {
-        crate::fsutil::ensure_state_directory(parent).map_err(|error| error.to_string())?;
-    }
-    let lock_path = path.with_file_name(format!(
+/// The lock file for a `known_hosts`, next to it.
+fn lock_path_for(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
         "{}.lock",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(KNOWN_HOSTS_FILE_NAME)
-    ));
-    let held = acquire_lock(&lock_path)?;
-    let outcome = edit();
-    if held {
-        // A lock taken over as stale is someone else's to remove now.
-        let _ = std::fs::remove_file(&lock_path);
-    }
-    outcome
+    ))
 }
 
-fn acquire_lock(lock_path: &Path) -> Result<bool, String> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let deadline = Instant::now() + LOCK_WAIT;
-    loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(crate::fsutil::PRIVATE_FILE_MODE)
-            .open(lock_path)
-        {
-            Ok(_) => return Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(format!("could not lock {}: {error}", lock_path.display())),
-        }
-        if is_stale_lock(lock_path) {
-            let _ = std::fs::remove_file(lock_path);
-            continue;
-        }
-        if Instant::now() >= deadline {
-            diagnose(&format!(
-                "sv: {} is locked by another process; writing the host key anyway.",
-                lock_path.display()
-            ));
-            return Ok(false);
-        }
-        std::thread::sleep(LOCK_RETRY);
+/// Hold an exclusive lock over `known_hosts` for one read-modify-write.
+///
+/// A lock that never frees means the edit is **skipped**, with one line on
+/// stderr. Editing the file anyway would be a read-modify-write racing the
+/// process that holds the lock, which is how an entry gets lost; skipping costs
+/// this connection its pinned key, and `StrictHostKeyChecking accept-new`
+/// covers that — the connection itself is unaffected either way.
+fn with_known_hosts_lock(
+    path: &Path,
+    wait: Duration,
+    edit: impl FnOnce() -> Result<KnownHostsChange, String>,
+) -> Result<KnownHostsChange, String> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        crate::fsutil::ensure_state_directory(parent).map_err(|error| error.to_string())?;
     }
+    let lock_path = lock_path_for(path);
+    let Some(_lock) = KnownHostsLock::take(&lock_path, wait)? else {
+        diagnose(&format!(
+            "sv: {} is locked by another process; leaving the recorded host key as it is.",
+            lock_path.display()
+        ));
+        return Ok(KnownHostsChange::Unchanged);
+    };
+    edit()
+}
+
+/// An `O_EXCL` lock file, held for one `known_hosts` edit.
+///
+/// An `O_EXCL` lock file, not `flock(2)`: the TypeScript `sv` and this one have
+/// to exclude *each other*, Node has no portable `flock`, and this is the
+/// mechanism both can implement the same way on every Unix.
+///
+/// The file carries the token of the process that created it, and two rules
+/// follow from that. A lock older than `LOCK_STALE` belonged to a process that
+/// died holding it and is taken over. And a lock is only ever unlinked while it
+/// still holds *this* token — otherwise a process whose own lock had been taken
+/// over as stale would come back and delete the lock the process that took it
+/// over is holding right now, letting a third one in on top of both.
+///
+/// Public because those two rules cannot be observed from outside otherwise,
+/// and a rule with no test is a rule that stops holding.
+pub struct KnownHostsLock {
+    path: PathBuf,
+    token: String,
+}
+
+impl KnownHostsLock {
+    /// `Ok(None)` when another process held it for the whole wait.
+    pub fn take(lock_path: &Path, wait: Duration) -> Result<Option<Self>, String> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let token = lock_token();
+        let deadline = Instant::now() + wait;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(crate::fsutil::PRIVATE_FILE_MODE)
+                .open(lock_path)
+            {
+                Ok(mut file) => {
+                    file.write_all(token.as_bytes())
+                        .and_then(|()| file.flush())
+                        .map_err(|error| {
+                            format!("could not write {}: {error}", lock_path.display())
+                        })?;
+                    return Ok(Some(Self {
+                        path: lock_path.to_path_buf(),
+                        token,
+                    }));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(format!("could not lock {}: {error}", lock_path.display()));
+                }
+            }
+            // A stale lock this process cannot remove is one it has to wait
+            // out, so the deadline is checked on that path too.
+            if is_stale_lock(lock_path) && std::fs::remove_file(lock_path).is_ok() {
+                continue;
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(LOCK_RETRY);
+        }
+    }
+}
+
+impl Drop for KnownHostsLock {
+    fn drop(&mut self) {
+        if std::fs::read_to_string(&self.path).ok().as_deref() == Some(self.token.as_str()) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// What a process writes into a lock file it created: enough to tell its own
+/// lock from one another process created after this one's was taken over.
+fn lock_token() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        crate::fsutil::random_suffix().unwrap_or_default()
+    )
 }
 
 fn is_stale_lock(lock_path: &Path) -> bool {
@@ -1073,7 +1229,8 @@ pub fn block_markers(alias: &str) -> (String, String) {
 pub struct ConfigBlockInput<'a> {
     /// `svartal-<name>`, the host a person types after `ssh`.
     pub alias: &'a str,
-    /// What `ssh-proxy` is given: the same word the alias was built from.
+    /// What `ssh-proxy` is given. A word that resolves to one workspace on its
+    /// own: the short name recorded for it, or its workspace id.
     pub target: &'a str,
     /// The `sv` this command was invoked as.
     pub binary: &'a str,
@@ -1095,7 +1252,7 @@ pub fn ssh_config_block(input: &ConfigBlockInput<'_>) -> String {
         format!(
             "  ProxyCommand {} ssh-proxy {}",
             quote_argument(input.binary),
-            input.target
+            quote_argument(input.target)
         ),
         format!("  IdentityFile {}", quote_argument(input.identity_file)),
         "  IdentitiesOnly yes".to_string(),
@@ -1127,6 +1284,84 @@ pub enum ConfigChange {
     Unchanged,
 }
 
+/// `~/.ssh`, created `0700` when it is missing.
+///
+/// Not `fsutil::ensure_state_directory`, which refuses a symlink: that rule is
+/// right for this CLI's own state directory and wrong here. A `~/.ssh` that
+/// points into a dotfiles checkout is an ordinary thing for a person to have,
+/// and this directory is theirs, not ours.
+fn ensure_ssh_config_directory(path: &Path) -> Result<(), SshError> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(setup_error(format!(
+            "{} is not a directory.",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(crate::fsutil::PRIVATE_DIRECTORY_MODE)
+            .create(path)
+            .map_err(|error| setup_error(format!("could not create {}: {error}", path.display()))),
+        Err(error) => Err(setup_error(format!(
+            "could not inspect {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// Write `~/.ssh/config`, in place.
+///
+/// Deliberately not `fsutil::write_private_file`. That one writes a new file
+/// and renames it over the old one, which is the right discipline for the two
+/// credentials this CLI owns and the wrong one for a file that belongs to the
+/// person: a `~/.ssh/config` is very often a symlink into a dotfiles checkout,
+/// and a rename would replace the link with a plain file and quietly take the
+/// file out of their repository. So an existing file is opened and truncated —
+/// which follows the link and keeps whatever mode they gave it — and only a
+/// file that is not there yet is created, `0600`, which is what OpenSSH insists
+/// on anyway. The TypeScript reference writes the same way, in place.
+fn write_ssh_config(path: &Path, body: &str) -> Result<(), SshError> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        ensure_ssh_config_directory(parent)?;
+    }
+    let failed =
+        |error: std::io::Error| setup_error(format!("could not write {}: {error}", path.display()));
+    let (mut file, created) = match std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
+        Ok(file) => (file, false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(crate::fsutil::PRIVATE_FILE_MODE)
+                .open(path)
+                .map_err(failed)?,
+            true,
+        ),
+        Err(error) => return Err(failed(error)),
+    };
+    file.write_all(body.as_bytes()).map_err(failed)?;
+    file.flush().map_err(failed)?;
+    if created {
+        // The create mode is masked by umask, so state it again. An existing
+        // file's mode is the person's business and is left alone.
+        std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(crate::fsutil::PRIVATE_FILE_MODE),
+        )
+        .map_err(failed)?;
+    }
+    Ok(())
+}
+
 /// Put the block in `~/.ssh/config`, replacing the one with the same marker.
 ///
 /// A file that is not there is created `0600` in a `0700` `~/.ssh`, which is
@@ -1150,8 +1385,7 @@ pub fn apply_ssh_config_block(
     };
 
     let Some(existing) = existing else {
-        crate::fsutil::write_private_file(path, format!("{block}\n").as_bytes())
-            .map_err(|error| setup_error(format!("could not write {}: {error}", path.display())))?;
+        write_ssh_config(path, &format!("{block}\n"))?;
         return Ok(ConfigChange::Created);
     };
 
@@ -1166,8 +1400,7 @@ pub fn apply_ssh_config_block(
         if replaced == existing {
             return Ok(ConfigChange::Unchanged);
         }
-        crate::fsutil::write_private_file(path, replaced.as_bytes())
-            .map_err(|error| setup_error(format!("could not write {}: {error}", path.display())))?;
+        write_ssh_config(path, &replaced)?;
         return Ok(ConfigChange::Replaced);
     }
 
@@ -1178,14 +1411,20 @@ pub fn apply_ssh_config_block(
     } else {
         "\n\n"
     };
-    crate::fsutil::write_private_file(path, format!("{existing}{separator}{block}\n").as_bytes())
-        .map_err(|error| setup_error(format!("could not write {}: {error}", path.display())))?;
+    write_ssh_config(path, &format!("{existing}{separator}{block}\n"))?;
     Ok(ConfigChange::Added)
 }
 
 pub struct SetupInput<'a> {
     pub state_directory: &'a Path,
     /// The word `ssh-proxy` will be given, and the alias is built from.
+    ///
+    /// It has to resolve to one workspace on its own, because `ssh` hands it
+    /// straight back to `sv ssh-proxy` with no other context: the short name
+    /// recorded for the workspace, or its workspace id. Never a display name —
+    /// "My Box" is a label, and a label is not something `ssh-proxy` can look
+    /// up. The alias is built from the same word so that `known_hosts` is keyed
+    /// by the host `ssh` is actually looking up.
     pub target: &'a str,
     /// The `sv` this command was invoked as, for the `ProxyCommand` line.
     pub binary: &'a str,
@@ -1199,6 +1438,9 @@ pub struct SetupInput<'a> {
 #[derive(Debug, Clone)]
 pub struct SetupOutcome {
     pub alias: String,
+    /// The word written into the `ProxyCommand` line, so the sentence this
+    /// command prints can name what it wrote.
+    pub target: String,
     pub block: String,
     pub key: ClientKey,
     /// `None` when `--print` was asked for: nothing was written.
@@ -1218,7 +1460,9 @@ pub fn run_ssh_setup(input: &SetupInput<'_>) -> Result<SetupOutcome, SshError> {
     let hosts_path = known_hosts_path(input.state_directory);
     let block = ssh_config_block(&ConfigBlockInput {
         alias: &alias,
-        target: &alias_token(input.target),
+        // Verbatim, never `alias_token`: the word has to still resolve when
+        // `ssh` hands it back, and a sanitized one need not.
+        target: input.target,
         binary: input.binary,
         identity_file: &key.private_key_path.display().to_string(),
         known_hosts_file: &hosts_path.display().to_string(),
@@ -1238,6 +1482,7 @@ pub fn run_ssh_setup(input: &SetupInput<'_>) -> Result<SetupOutcome, SshError> {
     if input.print {
         return Ok(SetupOutcome {
             alias,
+            target: input.target.to_string(),
             block,
             key,
             config: None,
@@ -1249,6 +1494,7 @@ pub fn run_ssh_setup(input: &SetupInput<'_>) -> Result<SetupOutcome, SshError> {
     let config = apply_ssh_config_block(input.ssh_config_path, &alias, &block)?;
     Ok(SetupOutcome {
         alias,
+        target: input.target.to_string(),
         block,
         key,
         config: Some(config),
@@ -1274,23 +1520,27 @@ pub fn describe_ssh_setup(outcome: &SetupOutcome) -> Vec<String> {
     }
     let path = outcome.ssh_config_path.display();
     let alias = &outcome.alias;
+    // Every one of these names the workspace the block points at, because that
+    // is the part a person cannot see from the alias: `ssh svartal-web` is a
+    // host, and `web` is the word `sv ssh-proxy` was given to find it with.
+    let target = &outcome.target;
     match outcome.config {
         Some(ConfigChange::Created) => {
-            lines.push(format!("Wrote {path}. Connect with `ssh {alias}`."));
+            lines.push(format!("Wrote {path}. `ssh {alias}` reaches {target}."));
         }
         Some(ConfigChange::Added) => {
             lines.push(format!(
-                "Added {alias} to {path}. Connect with `ssh {alias}`."
+                "Added {alias} to {path}. `ssh {alias}` reaches {target}."
             ));
         }
         Some(ConfigChange::Replaced) => {
             lines.push(format!(
-                "Updated {alias} in {path}. Connect with `ssh {alias}`."
+                "Updated {alias} in {path}. `ssh {alias}` reaches {target}."
             ));
         }
         Some(ConfigChange::Unchanged) => {
             lines.push(format!(
-                "{alias} is already set up in {path}. Connect with `ssh {alias}`."
+                "{alias} is already set up in {path}. `ssh {alias}` reaches {target}."
             ));
         }
         None => {}
@@ -1300,14 +1550,51 @@ pub fn describe_ssh_setup(outcome: &SetupOutcome) -> Vec<String> {
 
 /// The `sv` to put in the `ProxyCommand`.
 ///
-/// The path this binary was started as, so a `sv` that is not on `PATH` — a
-/// checkout, a second version, a Homebrew Cellar path — still works when `ssh`
-/// runs it with an environment of its own. `sv` is the fallback for the case
-/// where the runtime cannot say.
+/// The word this binary was *invoked* as — `argv[0]` — and not
+/// `current_exe()`. `current_exe` resolves every symlink on the way, so a
+/// Homebrew `sv` writes `/opt/homebrew/Cellar/svartal-cli/0.1.0/bin/sv` into a
+/// file that outlives the upgrade which deletes that directory, and a `sv`
+/// installed by a version manager writes a path inside one version of it. The
+/// invoked path keeps the link the person installed, which is the thing that
+/// stays true.
+///
+/// So: a bare command word found on `PATH` is written as it was typed, and
+/// `ssh` finds it the same way; a relative path is made absolute, because `ssh`
+/// runs the `ProxyCommand` from a working directory of its own; an absolute one
+/// is already the answer. `sv` is the fallback for a runtime that cannot say.
 pub fn invoked_binary_path() -> String {
-    std::env::current_exe()
-        .ok()
-        .map(|path| path.display().to_string())
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| "sv".to_string())
+    binary_path_of(
+        std::env::args_os()
+            .next()
+            .as_deref()
+            .and_then(|argv0| argv0.to_str()),
+        std::env::current_dir().ok().as_deref(),
+    )
+}
+
+/// The rule, with what the process supplies passed in so a test can state it.
+pub fn binary_path_of(argv0: Option<&str>, working_directory: Option<&Path>) -> String {
+    let Some(argv0) = argv0.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "sv".to_string();
+    };
+    let invoked = Path::new(argv0);
+    if invoked.is_absolute() || !argv0.contains(std::path::MAIN_SEPARATOR) {
+        return argv0.to_string();
+    }
+    let Some(working_directory) = working_directory else {
+        return argv0.to_string();
+    };
+    // Lexical, like the reference's `path.resolve`: the point is a path `ssh`
+    // can run from anywhere, not a path with the symlinks taken out of it.
+    let mut resolved = working_directory.to_path_buf();
+    for component in invoked.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+    }
+    resolved.display().to_string()
 }
