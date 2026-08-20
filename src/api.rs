@@ -131,6 +131,54 @@ pub fn list_machines(
     })
 }
 
+/// A knit API token the server just minted. The secret is shown exactly once
+/// by the server, so this is the only moment it can be written anywhere.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MintedKnitToken {
+    pub secret: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// Mints a durable knit API token for the signed-in identity.
+pub fn mint_knit_token(
+    http: &dyn HttpTransport,
+    api_base_url: &str,
+    access_token: &str,
+    name: &str,
+) -> Result<MintedKnitToken, ApiError> {
+    let action = "mint a knit token";
+    let response = http
+        .send(
+            Request::post(format!("{api_base_url}/api/v1/client/tokens"))
+                .header("authorization", &format!("Bearer {access_token}"))
+                .header("accept", "application/json")
+                .json(serde_json::json!({ "name": name })),
+        )
+        .map_err(|error| ApiError::Failed { action: action.to_string(), detail: error.to_string() })?;
+    if response.status == 401 || response.status == 403 {
+        return Err(ApiError::Unauthorized { action: action.to_string() });
+    }
+    if !response.is_success() {
+        return Err(ApiError::Failed {
+            action: action.to_string(),
+            detail: format!("Svartal returned HTTP {}.", response.status),
+        });
+    }
+    let body: Value = response.json().map_err(|error| ApiError::Failed {
+        action: action.to_string(),
+        detail: error.to_string(),
+    })?;
+    let data = body.get("data").cloned().unwrap_or(Value::Null);
+    serde_json::from_value(data).map_err(|error| ApiError::Failed {
+        action: action.to_string(),
+        detail: error.to_string(),
+    })
+}
+
 /// The environments this identity is linked to on the relay.
 pub fn list_linked_environments(
     http: &dyn HttpTransport,
