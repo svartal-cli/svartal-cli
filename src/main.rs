@@ -60,7 +60,7 @@ Options:
                      listens on (add). Default http://127.0.0.1:3773.
   --publish-only     Write the runbook for a box with no managed tunnel (add).
   --image <ref>      The machine image to run (host up). Default
-                     ghcr.io/marc-merino/svartal-host:latest.
+                     ghcr.io/svartal-cli/svartal-host:latest.
   --purge            Also delete the machine's identity and state (host down).
   --print-token      Write only a Svartal access token to stdout, to pipe into
                      the new box (add). Refused when stdout is a terminal.

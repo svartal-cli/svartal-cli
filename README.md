@@ -166,7 +166,7 @@ there is no trust-on-first-use prompt.
 `sv host up` turns the computer it runs on into a Svartal machine in one go:
 it registers a machine record for it, mints the broker's enrollment token,
 finds the current workspace image, starts the machine container
-(`ghcr.io/marc-merino/svartal-host`, brok's `docs/host-mode.md`) with its
+(`ghcr.io/svartal-cli/svartal-host`, brok's `docs/host-mode.md`) with its
 four mounts, grants you a personal workspace on it, and waits until that
 workspace is ready. Docker (Desktop, OrbStack, or the engine) is the only
 thing that has to be there first; a `docker login ghcr.io` is needed while
