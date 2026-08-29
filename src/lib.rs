@@ -19,6 +19,7 @@ pub mod commands;
 pub mod config;
 pub mod dpop;
 pub mod fsutil;
+pub mod host;
 pub mod http;
 pub mod jwt;
 pub mod link;

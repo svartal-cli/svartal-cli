@@ -42,6 +42,10 @@ Commands:
                      so `ssh svartal-<name>` works.
   ssh-proxy <target> Carry one ssh connection to a workspace. Run by ssh from
                      the ProxyCommand line ssh-setup wrote, not by hand.
+  host up            Make this computer a Svartal machine: register it, start
+                     the machine container, and wait for your workspace.
+  host status        Show the machine container and your workspace on it.
+  host down          Stop hosting; --purge also deletes the machine's state.
 
 A target is a short name, a workspace id, a workspace name, or a machine name.
 
@@ -55,6 +59,9 @@ Options:
   --origin <url>     The loopback origin the new box's environment server
                      listens on (add). Default http://127.0.0.1:3773.
   --publish-only     Write the runbook for a box with no managed tunnel (add).
+  --image <ref>      The machine image to run (host up). Default
+                     ghcr.io/marc-merino/svartal-host:latest.
+  --purge            Also delete the machine's identity and state (host down).
   --print-token      Write only a Svartal access token to stdout, to pipe into
                      the new box (add). Refused when stdout is a terminal.
   --token-file <p>   Write that token to a 0600 file instead (add).
@@ -113,6 +120,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "name" => &["--remove"],
         "ssh-setup" => &["--print", "--reset-hosts"],
         "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
+        "host" => &["--image", "--purge"],
         "whoami" | "machines" | "envs" | "sessions" => &["--json"],
         _ => &[],
     };
@@ -126,6 +134,8 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut token_file: Option<String> = None;
     let mut print_block = false;
     let mut reset_hosts = false;
+    let mut host_image: Option<String> = None;
+    let mut purge = false;
     let mut positional: Vec<&str> = Vec::new();
     // `sv` with nothing after it has no argument list to walk, not even an
     // empty one: the command itself is the missing element.
@@ -166,6 +176,14 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             "--print" => print_block = true,
             "--reset-hosts" => reset_hosts = true,
             "--print-token" => print_token = true,
+            "--purge" => purge = true,
+            "--image" => {
+                host_image = Some(
+                    rest.next()
+                        .ok_or_else(|| "--image needs an image reference.".to_string())?
+                        .clone(),
+                );
+            }
             "--token-file" => {
                 token_file = Some(
                     rest.next()
@@ -261,6 +279,20 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             commands::ssh_setup(&context, &mut stdout, &environment, target, print_block, reset_hosts)
         }
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
+        // This computer as a machine: one verb, three moments.
+        "host" => {
+            let docker = svartal::host::ProcessDocker;
+            match positional.first().copied() {
+                Some("up") => commands::host_up(&context, &mut stdout, &docker, host_image.as_deref()),
+                Some("status") => commands::host_status(&context, &mut stdout, &docker),
+                Some("down") => commands::host_down(&context, &mut stdout, &docker, purge),
+                _ => {
+                    return Err(
+                        "`sv host` needs one of: up (make this computer a Svartal machine), status, down.".to_string(),
+                    );
+                }
+            }
+        }
         "shell" => {
             let Some(target) = positional.first().copied() else {
                 return Err(

@@ -876,3 +876,204 @@ pub fn sessions(
     writeln!(out, "{}", view::format_sessions_view(&selected)).ok();
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// `sv host`: this computer as a Svartal machine.
+
+/// How long `sv host up` waits for the workspace, and how often it looks.
+const HOST_WAIT_ATTEMPTS: u32 = 72;
+const HOST_POLL_MS_ENV: &str = "SVARTAL_HOST_POLL_MS";
+
+fn host_poll_interval() -> std::time::Duration {
+    let millis = std::env::var(HOST_POLL_MS_ENV).ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(5_000);
+    std::time::Duration::from_millis(millis)
+}
+
+/// `sv host up [--image <ref>]`: register this computer, start the machine
+/// container, grant yourself a workspace, wait for it.
+pub fn host_up(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    docker: &dyn crate::host::Docker,
+    image_override: Option<&str>,
+) -> Result<(), CliError> {
+    use crate::host;
+    let session = context.current_session()?;
+    host::engine_ready(docker).map_err(CliError)?;
+    let state = context.config.state_directory.clone();
+    let existing = host::read_record(&state);
+    let image = image_override
+        .map(str::to_string)
+        .or_else(|| std::env::var(host::HOST_IMAGE_ENV).ok().filter(|value| !value.trim().is_empty()))
+        .or_else(|| existing.as_ref().map(|record| record.image.clone()))
+        .unwrap_or_else(|| host::DEFAULT_HOST_IMAGE.to_string());
+    let name = existing
+        .as_ref()
+        .map(|record| record.machine_name.clone())
+        .unwrap_or_else(|| host::machine_name(host::local_hostname().as_deref()));
+
+    writeln!(out, "Registering this computer with Svartal as {name}…").ok();
+    let registration = host::register_host(
+        context.http,
+        &context.config.api_base_url,
+        &session.access_token,
+        &name,
+        existing.as_ref().map(|record| record.machine_id.as_str()),
+    )
+    .map_err(CliError::of)?;
+    let token = registration
+        .enrollment_token
+        .clone()
+        .ok_or_else(|| CliError("Svartal registered the machine but issued no enrollment token.".to_string()))?;
+    let release = registration.release.clone().ok_or_else(|| {
+        CliError("Svartal has no published workspace image yet, so there is nothing for the machine to run. Publish a release, then run `sv host up` again.".to_string())
+    })?;
+
+    writeln!(out, "Pulling {image}…").ok();
+    let pulled = docker.run(&["pull".to_string(), image.clone()], None).map_err(CliError)?;
+    if !pulled.success {
+        let hint = if pulled.stderr.contains("denied") || pulled.stderr.contains("unauthorized") {
+            " Run `docker login ghcr.io` with a GitHub token that has read:packages, then try again."
+        } else {
+            ""
+        };
+        return Err(CliError(format!("Could not pull {image}: {}{hint}", pulled.stderr)));
+    }
+
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+    let docker_config = std::env::var("DOCKER_CONFIG").ok().filter(|value| !value.trim().is_empty());
+    let registry_auth = host::ghcr_auth_from_docker_config(&home, docker_config.as_deref());
+    match &registry_auth {
+        Some(auth) => host::install_registry_auth(docker, &image, auth).map_err(CliError)?,
+        None => {
+            writeln!(out, "No ghcr.io login in your docker config; the machine will pull the workspace image anonymously.").ok();
+        }
+    }
+
+    if host::container_state(docker).map_err(CliError)?.is_some() {
+        let removed = docker.run(&["rm".to_string(), "-f".to_string(), host::CONTAINER_NAME.to_string()], None).map_err(CliError)?;
+        if !removed.success {
+            return Err(CliError(format!("Could not replace the running machine container: {}", removed.stderr)));
+        }
+    }
+
+    let plan = host::HostPlan {
+        image: &image,
+        machine_id: &registration.machine.id,
+        enrollment_token: &token,
+        managed_image_ref: &release.image_ref,
+        api_base_url: &context.config.api_base_url,
+        relay_url: &context.config.relay_url,
+        issuer: &context.config.issuer,
+        registry_auth: registry_auth.is_some(),
+    };
+    crate::fsutil::ensure_state_directory(&state).map_err(CliError::of)?;
+    let env_file = state.join("host.env");
+    crate::fsutil::write_private_file(&env_file, host::env_file_body(&plan).as_bytes()).map_err(CliError::of)?;
+    let started = docker.run(&host::run_args(&image, &env_file), None);
+    let _ = crate::fsutil::remove_file(&env_file);
+    let started = started.map_err(CliError)?;
+    if !started.success {
+        return Err(CliError(format!("Could not start the machine container: {}", started.stderr)));
+    }
+    host::write_record(
+        &state,
+        &host::HostRecord { machine_id: registration.machine.id.clone(), machine_name: name.clone(), image: image.clone() },
+    )
+    .map_err(CliError)?;
+    writeln!(out, "Machine {name} is running (container {}).", host::CONTAINER_NAME).ok();
+
+    let mut last = String::new();
+    for _ in 0..HOST_WAIT_ATTEMPTS {
+        let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &registration.machine.id)
+            .map_err(CliError::of)?;
+        let sentence = host::intent_sentence(status.workspace_intent.as_ref());
+        if sentence != last {
+            writeln!(out, "{sentence}").ok();
+            last = sentence.clone();
+        }
+        match status.workspace_intent.as_ref().map(|intent| intent.lifecycle_state.as_str()) {
+            Some("ready") => {
+                writeln!(out, "Run `sv envs` to see it, or `sv shell {name}` to open it.").ok();
+                return Ok(());
+            }
+            Some("failed") => {
+                let logs = host::recent_logs(docker);
+                return Err(CliError(format!(
+                    "{sentence}\nThe machine's log ends with:\n{logs}\nFix the cause and run `sv host up` again."
+                )));
+            }
+            _ => {}
+        }
+        if host::container_state(docker).map_err(CliError)? != Some(true) {
+            let logs = host::recent_logs(docker);
+            return Err(CliError(format!(
+                "The machine container stopped. Its log ends with:\n{logs}\nFix the cause and run `sv host up` again."
+            )));
+        }
+        std::thread::sleep(host_poll_interval());
+    }
+    Err(CliError(format!(
+        "The workspace is still not ready after several minutes. `sv host status` keeps watching it; `docker logs {}` shows what the machine is doing.",
+        host::CONTAINER_NAME
+    )))
+}
+
+/// `sv host status`: the machine container and the workspace on it.
+pub fn host_status(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    docker: &dyn crate::host::Docker,
+) -> Result<(), CliError> {
+    use crate::host;
+    let Some(record) = host::read_record(&context.config.state_directory) else {
+        writeln!(out, "This computer is not a Svartal machine. Run `sv host up` to make it one.").ok();
+        return Ok(());
+    };
+    let container = match host::container_state(docker).map_err(CliError)? {
+        Some(true) => "running",
+        Some(false) => "stopped",
+        None => "missing",
+    };
+    writeln!(out, "Machine {} ({}): container {} is {container}.", record.machine_name, record.machine_id, host::CONTAINER_NAME).ok();
+    let session = context.current_session()?;
+    let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &record.machine_id)
+        .map_err(CliError::of)?;
+    writeln!(out, "{}", host::intent_sentence(status.workspace_intent.as_ref())).ok();
+    if let Some(environment_id) = status.workspace_intent.as_ref().and_then(|intent| intent.environment_id.as_deref()) {
+        writeln!(out, "Workspace environment {environment_id}; `sv shell {}` opens it.", record.machine_name).ok();
+    }
+    Ok(())
+}
+
+/// `sv host down [--purge]`: stop hosting. Without `--purge` the machine's
+/// identity and state stay on their volumes, so `sv host up` resumes it;
+/// with it, they are deleted.
+pub fn host_down(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    docker: &dyn crate::host::Docker,
+    purge: bool,
+) -> Result<(), CliError> {
+    use crate::host;
+    let state = &context.config.state_directory;
+    if host::container_state(docker).map_err(CliError)?.is_some() {
+        let removed = docker.run(&["rm".to_string(), "-f".to_string(), host::CONTAINER_NAME.to_string()], None).map_err(CliError)?;
+        if !removed.success {
+            return Err(CliError(format!("Could not remove the machine container: {}", removed.stderr)));
+        }
+        writeln!(out, "Machine container {} removed.", host::CONTAINER_NAME).ok();
+    } else {
+        writeln!(out, "No machine container was running.").ok();
+    }
+    if purge {
+        for volume in [host::CONFIG_VOLUME, host::STATE_VOLUME, host::RUN_VOLUME] {
+            let _ = docker.run(&["volume".to_string(), "rm".to_string(), "-f".to_string(), volume.to_string()], None);
+        }
+        host::remove_record(state);
+        writeln!(out, "The machine's identity and state volumes were deleted. Workspace containers and their volumes were left alone; remove them with docker if you want them gone.").ok();
+    } else {
+        writeln!(out, "The machine's identity and state were kept; `sv host up` resumes it. Workspace containers keep running.").ok();
+    }
+    Ok(())
+}

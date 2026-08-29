@@ -36,6 +36,7 @@ the source comments (`ID-9`, `ID-16`, `ID-25`, …) are that document's.
 | `close shell\|claude` | Ends the detached terminal instead of detaching from it, and says when nothing was running; `--terminal-id` too |
 | `add [pairing-url]`   | With a pairing URL: link the machine you run it on to your account, from the single-use URL its environment server prints at startup. Without one: how to connect a new machine, and the two safe ways to hand it a token. `--json`, `--origin`, `--publish-only`, `--print-token`, `--token-file` |
 | `name`                | Give a workspace a short word to type; `--remove` forgets one          |
+| `host up\|status\|down` | This computer as a Svartal machine: `up` registers it, starts the machine container (brok's host mode) and waits for your workspace; `status` and `down` do what they say; `--image`, `--purge` |
 | bare `sv`             | On a terminal: the environment list, arrow keys, enter opens a shell. Off a terminal it prints the usage and exits 1 |
 
 `claude` has been run against a live workspace: an interactive Claude terminal
@@ -159,6 +160,24 @@ process's exit status, because that is the only thing `ssh` can still read once
 the pump has started. The workspace's host key arrives on the authenticated
 channel and is written to `known_hosts` before a single byte is pumped, so
 there is no trust-on-first-use prompt.
+
+## Hosting workspaces on this computer
+
+`sv host up` turns the computer it runs on into a Svartal machine in one go:
+it registers a machine record for it, mints the broker's enrollment token,
+finds the current workspace image, starts the machine container
+(`ghcr.io/marc-merino/svartal-host`, brok's `docs/host-mode.md`) with its
+four mounts, grants you a personal workspace on it, and waits until that
+workspace is ready. Docker (Desktop, OrbStack, or the engine) is the only
+thing that has to be there first; a `docker login ghcr.io` is needed while
+the images are private, and `up` copies that credential into the machine's
+config volume so the machine can pull the workspace image too.
+
+The enrollment token never appears on a command line: it goes into a private
+`--env-file` the docker client reads, deleted as soon as the container has
+started. `sv host status` shows the container and the workspace state;
+`sv host down` stops hosting and keeps the machine's identity so `up` resumes
+it; `--purge` deletes it.
 
 ## Adding a machine
 
