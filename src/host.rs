@@ -23,7 +23,7 @@ use crate::http::{HttpTransport, Request};
 
 /// The image `brok host serve` ships in. Published by brok's host-image
 /// workflow on every push to its main branch.
-pub const DEFAULT_HOST_IMAGE: &str = "ghcr.io/marc-merino/svartal-host:latest";
+pub const DEFAULT_HOST_IMAGE: &str = "ghcr.io/svartal-cli/svartal-host:latest";
 pub const HOST_IMAGE_ENV: &str = "SVARTAL_HOST_IMAGE";
 pub const DOCKER_BINARY_ENV: &str = "SVARTAL_DOCKER_BINARY";
 pub const CONTAINER_NAME: &str = "svartal-host";
