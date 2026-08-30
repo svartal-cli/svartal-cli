@@ -889,12 +889,18 @@ fn host_poll_interval() -> std::time::Duration {
     std::time::Duration::from_millis(millis)
 }
 
-/// `sv host up [--image <ref>]`: register this computer, start the machine
-/// container, grant yourself a workspace, wait for it.
+/// `sv host up [--name <name>] [--image <ref>]`: start the machine container
+/// on this computer, register it, grant yourself a workspace, wait for it.
+///
+/// The order is deliberate. Everything that can refuse — no docker, no
+/// engine, no image, no registry credential — is asked before Svartal is
+/// told anything, so a run that cannot finish leaves no machine record and
+/// no workspace grant behind on the account.
 pub fn host_up(
     context: &Context<'_>,
     out: &mut dyn Write,
     docker: &dyn crate::host::Docker,
+    name_override: Option<&str>,
     image_override: Option<&str>,
 ) -> Result<(), CliError> {
     use crate::host;
@@ -907,27 +913,12 @@ pub fn host_up(
         .or_else(|| std::env::var(host::HOST_IMAGE_ENV).ok().filter(|value| !value.trim().is_empty()))
         .or_else(|| existing.as_ref().map(|record| record.image.clone()))
         .unwrap_or_else(|| host::DEFAULT_HOST_IMAGE.to_string());
-    let name = existing
-        .as_ref()
-        .map(|record| record.machine_name.clone())
+    let name = name_override
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(host::sanitize_machine_name)
+        .or_else(|| existing.as_ref().map(|record| record.machine_name.clone()))
         .unwrap_or_else(|| host::machine_name(host::local_hostname().as_deref()));
-
-    writeln!(out, "Registering this computer with Svartal as {name}…").ok();
-    let registration = host::register_host(
-        context.http,
-        &context.config.api_base_url,
-        &session.access_token,
-        &name,
-        existing.as_ref().map(|record| record.machine_id.as_str()),
-    )
-    .map_err(CliError::of)?;
-    let token = registration
-        .enrollment_token
-        .clone()
-        .ok_or_else(|| CliError("Svartal registered the machine but issued no enrollment token.".to_string()))?;
-    let release = registration.release.clone().ok_or_else(|| {
-        CliError("Svartal has no published workspace image yet, so there is nothing for the machine to run. Publish a release, then run `sv host up` again.".to_string())
-    })?;
 
     writeln!(out, "Pulling {image}…").ok();
     let pulled = docker.run(&["pull".to_string(), image.clone()], None).map_err(CliError)?;
@@ -949,6 +940,25 @@ pub fn host_up(
             writeln!(out, "No ghcr.io login in your docker config; the machine will pull the workspace image anonymously.").ok();
         }
     }
+
+    writeln!(out, "Registering this computer with Svartal as {name}…").ok();
+    let registration = host::register_host(
+        context.http,
+        &context.config.api_base_url,
+        &session.access_token,
+        &name,
+        existing.as_ref().map(|record| record.machine_id.as_str()),
+    )
+    .map_err(CliError::of)?;
+    let token = registration
+        .enrollment_token
+        .clone()
+        .ok_or_else(|| CliError("Svartal registered the machine but issued no enrollment token.".to_string()))?;
+    let release = registration.release.clone().ok_or_else(|| {
+        CliError("Svartal has no published workspace image yet, so there is nothing for the machine to run. Publish a release, then run `sv host up` again.".to_string())
+    })?;
+    // The name Svartal recorded, which is what `sv envs` and `sv shell` show.
+    let name = registration.machine.name.clone();
 
     if host::container_state(docker).map_err(CliError)?.is_some() {
         let removed = docker.run(&["rm".to_string(), "-f".to_string(), host::CONTAINER_NAME.to_string()], None).map_err(CliError)?;

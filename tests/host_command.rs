@@ -209,7 +209,7 @@ fn up_registers_starts_the_container_and_waits_for_the_workspace() {
     let dir = TempDir::new("host-up");
     let docker = FakeDocker::new(true);
     let run = run(true, &docker, vec!["requested", "provisioning", "ready"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, Some("ghcr.io/x/svartal-host:test"))
+        commands::host_up(context, out, docker, None, Some("ghcr.io/x/svartal-host:test"))
     });
     run.outcome.unwrap();
     assert!(run.output.contains("Registering this computer with Svartal as "), "{}", run.output);
@@ -220,12 +220,15 @@ fn up_registers_starts_the_container_and_waits_for_the_workspace() {
 
     // One registration, then polls until ready.
     assert_eq!(run.posted.len(), 1);
+    // Nothing was registered before the image was in hand.
+    let calls = docker.calls();
+    let pulled = calls.iter().position(|call| call.starts_with("pull ")).expect("a pull");
+    assert!(pulled == 1 || pulled == 0, "the pull must come first: {calls:?}");
     assert!(run.posted[0].get("machine_id").is_none(), "a first up must not name a machine");
     assert_eq!(run.urls.iter().filter(|url| url.ends_with(MACHINE_ID)).count(), 3);
 
     // The container: pulled, run with the four mounts and the env-file, and
     // nothing secret in argv.
-    let calls = docker.calls();
     assert!(calls.iter().any(|call| call == "pull ghcr.io/x/svartal-host:test"), "{calls:?}");
     let started = calls.iter().find(|call| call.starts_with("run -d")).expect("a run");
     for mount in [
@@ -269,7 +272,7 @@ fn a_second_up_reuses_the_machine_and_replaces_the_container() {
     let docker = FakeDocker::new(true);
     *docker.running.lock().unwrap() = Some(true);
     let run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, None)
+        commands::host_up(context, out, docker, None, None)
     });
     run.outcome.unwrap();
     assert_eq!(run.posted[0]["machine_id"], MACHINE_ID);
@@ -288,7 +291,7 @@ fn a_registry_login_on_this_computer_is_copied_into_the_machine() {
     std::fs::write(dir.path().join(".docker/config.json"), r#"{"auths":{"ghcr.io":{"auth":"dXNlcjpwYXQ="}}}"#).unwrap();
     let docker = FakeDocker::new(true);
     let run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, Some("ghcr.io/x/svartal-host:test"))
+        commands::host_up(context, out, docker, None, Some("ghcr.io/x/svartal-host:test"))
     });
     run.outcome.unwrap();
     let stdin = docker.stdin.lock().unwrap().clone();
@@ -306,7 +309,7 @@ fn a_failed_workspace_names_the_cause_and_the_log() {
     let dir = TempDir::new("host-up-failed");
     let docker = FakeDocker::new(true);
     let run = run(true, &docker, vec!["requested", "failed"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, Some("img"))
+        commands::host_up(context, out, docker, None, Some("img"))
     });
     let error = run.outcome.unwrap_err().to_string();
     assert!(error.contains("host_capacity_disk"), "{error}");
@@ -318,16 +321,16 @@ fn a_failed_workspace_names_the_cause_and_the_log() {
 fn no_engine_no_release_and_no_session_each_get_their_sentence() {
     let dir = TempDir::new("host-up-refusals");
     let down = FakeDocker::new(false);
-    let run_down = run(true, &down, vec![], true, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None));
+    let run_down = run(true, &down, vec![], true, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None, None));
     assert!(run_down.outcome.unwrap_err().to_string().contains("Docker is not running"));
     assert!(run_down.posted.is_empty(), "registered a machine with no engine");
 
     let up = FakeDocker::new(true);
-    let run_none = run(true, &up, vec![], false, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None));
+    let run_none = run(true, &up, vec![], false, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None, None));
     assert!(run_none.outcome.unwrap_err().to_string().contains("no published workspace image"));
     assert!(!up.calls().iter().any(|call| call.starts_with("run")), "started a machine with nothing to run");
 
-    let run_out = run(false, &up, vec![], true, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None));
+    let run_out = run(false, &up, vec![], true, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None, None));
     assert_eq!(run_out.outcome.unwrap_err().to_string(), commands::NOT_SIGNED_IN);
 }
 
@@ -363,4 +366,59 @@ fn status_and_down_read_the_record_and_purge_deletes_it() {
     for volume in ["svartal-host-config", "svartal-host-state", "svartal-run"] {
         assert!(calls.iter().any(|call| call == &format!("volume rm -f {volume}")), "{calls:?}");
     }
+}
+
+#[test]
+fn a_pull_that_fails_leaves_no_machine_on_the_account() {
+    let dir = TempDir::new("host-up-pull-fails");
+    struct NoImage(FakeDocker);
+    impl Docker for NoImage {
+        fn run(&self, args: &[String], stdin: Option<&[u8]>) -> Result<DockerOutput, String> {
+            if args.first().map(String::as_str) == Some("pull") {
+                self.0.calls.lock().unwrap().push(args.to_vec());
+                return Ok(DockerOutput {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "error from registry: unauthorized".into(),
+                });
+            }
+            self.0.run(args, stdin)
+        }
+    }
+    let docker = NoImage(FakeDocker::new(true));
+    let run = run(true, &docker.0, vec!["ready"], true, dir.path(), |context, out, _| {
+        commands::host_up(context, out, &docker, None, Some("ghcr.io/x/svartal-host:test"))
+    });
+    let error = run.outcome.unwrap_err().to_string();
+    assert!(error.contains("Could not pull"), "{error}");
+    assert!(error.contains("docker login ghcr.io"), "{error}");
+    // Nothing was created: no registration call, no local record.
+    assert!(run.posted.is_empty(), "a machine was registered for a run that could not start");
+    assert!(!run.urls.iter().any(|url| url.contains("host-machines")), "{:?}", run.urls);
+    assert!(host::read_record(&dir.path().join("config")).is_none());
+}
+
+#[test]
+fn a_given_name_reaches_svartal_and_is_cleaned_first() {
+    let dir = TempDir::new("host-up-name");
+    let docker = FakeDocker::new(true);
+    let first_run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, Some("  work laptop\n "), Some("img"))
+    });
+    first_run.outcome.unwrap();
+    assert_eq!(first_run.posted[0]["name"], "work laptop");
+
+    // A later run without --name keeps the recorded name, and one with a new
+    // name sends it alongside the machine id, which is how a rename happens.
+    let again_run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"))
+    });
+    again_run.outcome.unwrap();
+    assert_eq!(again_run.posted[0]["name"], "work laptop", "the recorded name must survive a plain up");
+    let renamed_run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, Some("kitchen mac"), Some("img"))
+    });
+    renamed_run.outcome.unwrap();
+    assert_eq!(renamed_run.posted[0]["name"], "kitchen mac");
+    assert_eq!(renamed_run.posted[0]["machine_id"], MACHINE_ID);
 }
