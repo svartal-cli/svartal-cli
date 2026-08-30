@@ -59,6 +59,8 @@ Options:
   --origin <url>     The loopback origin the new box's environment server
                      listens on (add). Default http://127.0.0.1:3773.
   --publish-only     Write the runbook for a box with no managed tunnel (add).
+  --name <name>      What to call this machine (host up). Defaults to this
+                     computer's hostname; passing it again renames the machine.
   --image <ref>      The machine image to run (host up). Default
                      ghcr.io/svartal-cli/svartal-host:latest.
   --purge            Also delete the machine's identity and state (host down).
@@ -120,7 +122,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "name" => &["--remove"],
         "ssh-setup" => &["--print", "--reset-hosts"],
         "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
-        "host" => &["--image", "--purge"],
+        "host" => &["--image", "--name", "--purge"],
         "whoami" | "machines" | "envs" | "sessions" => &["--json"],
         _ => &[],
     };
@@ -135,6 +137,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut print_block = false;
     let mut reset_hosts = false;
     let mut host_image: Option<String> = None;
+    let mut host_name: Option<String> = None;
     let mut purge = false;
     let mut positional: Vec<&str> = Vec::new();
     // `sv` with nothing after it has no argument list to walk, not even an
@@ -177,6 +180,13 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             "--reset-hosts" => reset_hosts = true,
             "--print-token" => print_token = true,
             "--purge" => purge = true,
+            "--name" => {
+                host_name = Some(
+                    rest.next()
+                        .ok_or_else(|| "--name needs a name for this machine.".to_string())?
+                        .clone(),
+                );
+            }
             "--image" => {
                 host_image = Some(
                     rest.next()
@@ -283,7 +293,13 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "host" => {
             let docker = svartal::host::ProcessDocker;
             match positional.first().copied() {
-                Some("up") => commands::host_up(&context, &mut stdout, &docker, host_image.as_deref()),
+                Some("up") => commands::host_up(
+                    &context,
+                    &mut stdout,
+                    &docker,
+                    host_name.as_deref(),
+                    host_image.as_deref(),
+                ),
                 Some("status") => commands::host_status(&context, &mut stdout, &docker),
                 Some("down") => commands::host_down(&context, &mut stdout, &docker, purge),
                 _ => {

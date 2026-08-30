@@ -245,6 +245,9 @@ pub fn register_host(
     machine_id: Option<&str>,
 ) -> Result<HostRegistration, ApiError> {
     let action = "register this computer as a machine";
+    // The name rides along even when the machine is known: it is how
+    // `sv host up --name` renames a machine that was first registered with
+    // this computer's hostname.
     let mut body = json!({ "name": name });
     if let Some(id) = machine_id {
         body["machine_id"] = json!(id);
@@ -413,8 +416,25 @@ pub fn intent_sentence(intent: Option<&HostIntent>) -> String {
     }
 }
 
-/// The name a machine record gets: this computer's hostname, trimmed to what
-/// the API accepts, or a plain word when it has none.
+/// A machine name the API accepts: printable, no control characters, at most
+/// 64 characters. A person's own `--name` goes through this too, so a name
+/// this CLI would refuse never reaches Svartal.
+pub fn sanitize_machine_name(name: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(64)
+        .collect();
+    let cleaned = cleaned.trim().to_string();
+    if cleaned.is_empty() { "my-computer".to_string() } else { cleaned }
+}
+
+/// The name a machine record gets when nobody passed one: this computer's
+/// hostname, without the `.local` suffix, or a plain word when it has none.
+///
+/// A work laptop's hostname is often its serial number, which is a poor name
+/// to see in `sv envs` — hence `sv host up --name`.
 pub fn machine_name(hostname: Option<&str>) -> String {
     let name: String = hostname
         .unwrap_or("")
@@ -485,6 +505,14 @@ mod tests {
         assert_eq!(machine_name(Some("  ")), "my-computer");
         assert_eq!(machine_name(None), "my-computer");
         assert_eq!(machine_name(Some("bad name!")), "badname");
+    }
+
+    #[test]
+    fn a_persons_own_name_keeps_its_spaces_and_loses_its_junk() {
+        assert_eq!(sanitize_machine_name("  work laptop  "), "work laptop");
+        assert_eq!(sanitize_machine_name("work\nlaptop"), "worklaptop");
+        assert_eq!(sanitize_machine_name("   "), "my-computer");
+        assert_eq!(sanitize_machine_name(&"x".repeat(100)).len(), 64);
     }
 
     #[test]
