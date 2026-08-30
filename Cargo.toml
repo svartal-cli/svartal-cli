@@ -1,6 +1,6 @@
 [package]
 name = "svartal-cli"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "The Svartal terminal CLI: sign in, list machines, and (later) open a shell on a workspace. Rust port of the npm @svartal/cli."
 license = "MIT"
