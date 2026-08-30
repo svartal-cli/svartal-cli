@@ -44,7 +44,8 @@ Commands:
                      the ProxyCommand line ssh-setup wrote, not by hand.
   host up            Make this computer a Svartal machine: register it, start
                      the machine container, and wait for your workspace.
-  host status        Show the machine container and your workspace on it.
+  host status        Show the machine container and your workspace on it, for
+                     every machine on this computer or one --instance of them.
   host down          Stop hosting; --purge also deletes the machine's state.
 
 A target is a short name, a workspace id, a workspace name, or a machine name.
@@ -64,6 +65,10 @@ Options:
   --image <ref>      The machine image to run (host up). Default
                      ghcr.io/svartal-cli/svartal-host:latest.
   --purge            Also delete the machine's identity and state (host down).
+  --instance <name>  Which machine on this computer to act on (host). Leave it
+                     out for the one `sv host up` starts by default; pass it to
+                     run a second machine here, with its own container, volumes
+                     and workspace.
   --print-token      Write only a Svartal access token to stdout, to pipe into
                      the new box (add). Refused when stdout is a terminal.
   --token-file <p>   Write that token to a 0600 file instead (add).
@@ -122,7 +127,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "name" => &["--remove"],
         "ssh-setup" => &["--print", "--reset-hosts"],
         "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
-        "host" => &["--image", "--name", "--purge"],
+        "host" => &["--image", "--instance", "--name", "--purge"],
         "whoami" | "machines" | "envs" | "sessions" => &["--json"],
         _ => &[],
     };
@@ -138,6 +143,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut reset_hosts = false;
     let mut host_image: Option<String> = None;
     let mut host_name: Option<String> = None;
+    let mut host_instance: Option<String> = None;
     let mut purge = false;
     let mut positional: Vec<&str> = Vec::new();
     // `sv` with nothing after it has no argument list to walk, not even an
@@ -184,6 +190,13 @@ fn run(arguments: &[String]) -> Result<u8, String> {
                 host_name = Some(
                     rest.next()
                         .ok_or_else(|| "--name needs a name for this machine.".to_string())?
+                        .clone(),
+                );
+            }
+            "--instance" => {
+                host_instance = Some(
+                    rest.next()
+                        .ok_or_else(|| "--instance needs the name of a machine on this computer.".to_string())?
                         .clone(),
                 );
             }
@@ -299,9 +312,10 @@ fn run(arguments: &[String]) -> Result<u8, String> {
                     &docker,
                     host_name.as_deref(),
                     host_image.as_deref(),
+                    host_instance.as_deref(),
                 ),
-                Some("status") => commands::host_status(&context, &mut stdout, &docker),
-                Some("down") => commands::host_down(&context, &mut stdout, &docker, purge),
+                Some("status") => commands::host_status(&context, &mut stdout, &docker, host_instance.as_deref()),
+                Some("down") => commands::host_down(&context, &mut stdout, &docker, purge, host_instance.as_deref()),
                 _ => {
                     return Err(
                         "`sv host` needs one of: up (make this computer a Svartal machine), status, down.".to_string(),

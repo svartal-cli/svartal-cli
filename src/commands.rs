@@ -889,25 +889,34 @@ fn host_poll_interval() -> std::time::Duration {
     std::time::Duration::from_millis(millis)
 }
 
-/// `sv host up [--name <name>] [--image <ref>]`: start the machine container
-/// on this computer, register it, grant yourself a workspace, wait for it.
+/// How a sentence names the machine a command is about. The default machine
+/// is the only one there was, so it is still spoken of without a word for it.
+fn instance_phrase(instance: &crate::host::Instance) -> String {
+    instance.name().map(|name| format!(" on instance {name}")).unwrap_or_default()
+}
+
+/// `sv host up [--name <name>] [--image <ref>] [--instance <name>]`: start
+/// the machine container on this computer, register it, grant yourself a
+/// workspace, wait for it.
 ///
-/// The order is deliberate. Everything that can refuse — no docker, no
-/// engine, no image, no registry credential — is asked before Svartal is
-/// told anything, so a run that cannot finish leaves no machine record and
-/// no workspace grant behind on the account.
+/// The order is deliberate. Everything that can refuse — a name this cannot
+/// use, no docker, no engine, no image, no registry credential — is asked
+/// before Svartal is told anything, so a run that cannot finish leaves no
+/// machine record and no workspace grant behind on the account.
 pub fn host_up(
     context: &Context<'_>,
     out: &mut dyn Write,
     docker: &dyn crate::host::Docker,
     name_override: Option<&str>,
     image_override: Option<&str>,
+    instance: Option<&str>,
 ) -> Result<(), CliError> {
     use crate::host;
+    let instance = host::Instance::parse(instance).map_err(CliError)?;
     let session = context.current_session()?;
     host::engine_ready(docker).map_err(CliError)?;
     let state = context.config.state_directory.clone();
-    let existing = host::read_record(&state);
+    let existing = host::read_record(&state, &instance);
     let image = image_override
         .map(str::to_string)
         .or_else(|| std::env::var(host::HOST_IMAGE_ENV).ok().filter(|value| !value.trim().is_empty()))
@@ -918,7 +927,7 @@ pub fn host_up(
         .filter(|name| !name.is_empty())
         .map(host::sanitize_machine_name)
         .or_else(|| existing.as_ref().map(|record| record.machine_name.clone()))
-        .unwrap_or_else(|| host::machine_name(host::local_hostname().as_deref()));
+        .unwrap_or_else(|| host::machine_name_for(&instance, host::local_hostname().as_deref()));
 
     writeln!(out, "Pulling {image}…").ok();
     let pulled = docker.run(&["pull".to_string(), image.clone()], None).map_err(CliError)?;
@@ -935,7 +944,7 @@ pub fn host_up(
     let docker_config = std::env::var("DOCKER_CONFIG").ok().filter(|value| !value.trim().is_empty());
     let registry_auth = host::ghcr_auth_from_docker_config(&home, docker_config.as_deref());
     match &registry_auth {
-        Some(auth) => host::install_registry_auth(docker, &image, auth).map_err(CliError)?,
+        Some(auth) => host::install_registry_auth(docker, &instance, &image, auth).map_err(CliError)?,
         None => {
             writeln!(out, "No ghcr.io login in your docker config; the machine will pull the workspace image anonymously.").ok();
         }
@@ -960,14 +969,15 @@ pub fn host_up(
     // The name Svartal recorded, which is what `sv envs` and `sv shell` show.
     let name = registration.machine.name.clone();
 
-    if host::container_state(docker).map_err(CliError)?.is_some() {
-        let removed = docker.run(&["rm".to_string(), "-f".to_string(), host::CONTAINER_NAME.to_string()], None).map_err(CliError)?;
+    if host::container_state(docker, &instance).map_err(CliError)?.is_some() {
+        let removed = docker.run(&["rm".to_string(), "-f".to_string(), instance.container()], None).map_err(CliError)?;
         if !removed.success {
             return Err(CliError(format!("Could not replace the running machine container: {}", removed.stderr)));
         }
     }
 
     let plan = host::HostPlan {
+        instance: &instance,
         image: &image,
         machine_id: &registration.machine.id,
         enrollment_token: &token,
@@ -978,9 +988,9 @@ pub fn host_up(
         registry_auth: registry_auth.is_some(),
     };
     crate::fsutil::ensure_state_directory(&state).map_err(CliError::of)?;
-    let env_file = state.join("host.env");
+    let env_file = state.join(instance.env_file());
     crate::fsutil::write_private_file(&env_file, host::env_file_body(&plan).as_bytes()).map_err(CliError::of)?;
-    let started = docker.run(&host::run_args(&image, &env_file), None);
+    let started = docker.run(&host::run_args(&instance, &image, &env_file), None);
     let _ = crate::fsutil::remove_file(&env_file);
     let started = started.map_err(CliError)?;
     if !started.success {
@@ -988,10 +998,11 @@ pub fn host_up(
     }
     host::write_record(
         &state,
+        &instance,
         &host::HostRecord { machine_id: registration.machine.id.clone(), machine_name: name.clone(), image: image.clone() },
     )
     .map_err(CliError)?;
-    writeln!(out, "Machine {name} is running (container {}).", host::CONTAINER_NAME).ok();
+    writeln!(out, "Machine {name} is running (container {}).", instance.container()).ok();
 
     let mut last = String::new();
     for _ in 0..HOST_WAIT_ATTEMPTS {
@@ -1008,15 +1019,15 @@ pub fn host_up(
                 return Ok(());
             }
             Some("failed") => {
-                let logs = host::recent_logs(docker);
+                let logs = host::recent_logs(docker, &instance);
                 return Err(CliError(format!(
                     "{sentence}\nThe machine's log ends with:\n{logs}\nFix the cause and run `sv host up` again."
                 )));
             }
             _ => {}
         }
-        if host::container_state(docker).map_err(CliError)? != Some(true) {
-            let logs = host::recent_logs(docker);
+        if host::container_state(docker, &instance).map_err(CliError)? != Some(true) {
+            let logs = host::recent_logs(docker, &instance);
             return Err(CliError(format!(
                 "The machine container stopped. Its log ends with:\n{logs}\nFix the cause and run `sv host up` again."
             )));
@@ -1025,62 +1036,100 @@ pub fn host_up(
     }
     Err(CliError(format!(
         "The workspace is still not ready after several minutes. `sv host status` keeps watching it; `docker logs {}` shows what the machine is doing.",
-        host::CONTAINER_NAME
+        instance.container()
     )))
 }
 
-/// `sv host status`: the machine container and the workspace on it.
+/// `sv host status [--instance <name>]`: the machine container and the
+/// workspace on it. Without `--instance` every machine this computer has
+/// started is shown, because a person who has two of them should not have to
+/// remember the word they used to start the second one.
 pub fn host_status(
     context: &Context<'_>,
     out: &mut dyn Write,
     docker: &dyn crate::host::Docker,
+    instance: Option<&str>,
 ) -> Result<(), CliError> {
     use crate::host;
-    let Some(record) = host::read_record(&context.config.state_directory) else {
-        writeln!(out, "This computer is not a Svartal machine. Run `sv host up` to make it one.").ok();
+    let state = &context.config.state_directory;
+    let instances = match instance {
+        Some(name) => vec![host::Instance::parse(Some(name)).map_err(CliError)?],
+        None => host::known_instances(state),
+    };
+    if instances.iter().all(|instance| host::read_record(state, instance).is_none()) {
+        match instances.first().and_then(host::Instance::name) {
+            Some(name) => {
+                writeln!(out, "There is no Svartal machine called {name} on this computer. Run `sv host up --instance {name}` to make one.").ok();
+            }
+            _ => {
+                writeln!(out, "This computer is not a Svartal machine. Run `sv host up` to make it one.").ok();
+            }
+        }
         return Ok(());
-    };
-    let container = match host::container_state(docker).map_err(CliError)? {
-        Some(true) => "running",
-        Some(false) => "stopped",
-        None => "missing",
-    };
-    writeln!(out, "Machine {} ({}): container {} is {container}.", record.machine_name, record.machine_id, host::CONTAINER_NAME).ok();
+    }
     let session = context.current_session()?;
-    let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &record.machine_id)
-        .map_err(CliError::of)?;
-    writeln!(out, "{}", host::intent_sentence(status.workspace_intent.as_ref())).ok();
-    if let Some(environment_id) = status.workspace_intent.as_ref().and_then(|intent| intent.environment_id.as_deref()) {
-        writeln!(out, "Workspace environment {environment_id}; `sv shell {}` opens it.", record.machine_name).ok();
+    for (position, instance) in instances.iter().enumerate() {
+        let Some(record) = host::read_record(state, instance) else {
+            continue;
+        };
+        if position > 0 {
+            writeln!(out).ok();
+        }
+        let container = match host::container_state(docker, instance).map_err(CliError)? {
+            Some(true) => "running",
+            Some(false) => "stopped",
+            None => "missing",
+        };
+        writeln!(
+            out,
+            "Machine {} ({}){}: container {} is {container}.",
+            record.machine_name,
+            record.machine_id,
+            instance_phrase(instance),
+            instance.container()
+        )
+        .ok();
+        let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &record.machine_id)
+            .map_err(CliError::of)?;
+        writeln!(out, "{}", host::intent_sentence(status.workspace_intent.as_ref())).ok();
+        if let Some(environment_id) = status.workspace_intent.as_ref().and_then(|intent| intent.environment_id.as_deref()) {
+            writeln!(out, "Workspace environment {environment_id}; `sv shell {}` opens it.", record.machine_name).ok();
+        }
     }
     Ok(())
 }
 
-/// `sv host down [--purge]`: stop hosting. Without `--purge` the machine's
-/// identity and state stay on their volumes, so `sv host up` resumes it;
-/// with it, they are deleted.
+/// `sv host down [--purge] [--instance <name>]`: stop hosting. Without
+/// `--purge` the machine's identity and state stay on their volumes, so
+/// `sv host up` resumes it; with it, they are deleted.
+///
+/// Without `--instance` this is the default machine and only that one:
+/// stopping every machine on the computer is not something a person should
+/// get by leaving a word out.
 pub fn host_down(
     context: &Context<'_>,
     out: &mut dyn Write,
     docker: &dyn crate::host::Docker,
     purge: bool,
+    instance: Option<&str>,
 ) -> Result<(), CliError> {
     use crate::host;
+    let instance = host::Instance::parse(instance).map_err(CliError)?;
     let state = &context.config.state_directory;
-    if host::container_state(docker).map_err(CliError)?.is_some() {
-        let removed = docker.run(&["rm".to_string(), "-f".to_string(), host::CONTAINER_NAME.to_string()], None).map_err(CliError)?;
+    if host::container_state(docker, &instance).map_err(CliError)?.is_some() {
+        let removed = docker.run(&["rm".to_string(), "-f".to_string(), instance.container()], None).map_err(CliError)?;
         if !removed.success {
             return Err(CliError(format!("Could not remove the machine container: {}", removed.stderr)));
         }
-        writeln!(out, "Machine container {} removed.", host::CONTAINER_NAME).ok();
+        writeln!(out, "Machine container {} removed.", instance.container()).ok();
     } else {
-        writeln!(out, "No machine container was running.").ok();
+        writeln!(out, "No machine container{} was running.", instance_phrase(&instance)).ok();
     }
     if purge {
-        for volume in [host::CONFIG_VOLUME, host::STATE_VOLUME, host::RUN_VOLUME] {
-            let _ = docker.run(&["volume".to_string(), "rm".to_string(), "-f".to_string(), volume.to_string()], None);
+        for volume in [instance.config_volume(), instance.state_volume(), instance.run_volume()] {
+            let _ = docker.run(&["volume".to_string(), "rm".to_string(), "-f".to_string(), volume], None);
         }
-        host::remove_record(state);
+        host::remove_record(state, &instance);
         writeln!(out, "The machine's identity and state volumes were deleted. Workspace containers and their volumes were left alone; remove them with docker if you want them gone.").ok();
     } else {
         writeln!(out, "The machine's identity and state were kept; `sv host up` resumes it. Workspace containers keep running.").ok();
