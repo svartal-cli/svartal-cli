@@ -342,6 +342,8 @@ fn the_connect_chain_is_the_reference_chain() {
             .map(str::to_string),
         linked: true,
         machine_presence: Some("unknown".to_string()),
+        machine_id: None,
+        machine_runtime_state: None,
     };
 
     let socket_url = sshproxy::connect_bridge(
@@ -1658,6 +1660,8 @@ fn connect_with_endpoint(http_base: &str, ws_base: &str) -> String {
         machine_name: None,
         linked: true,
         machine_presence: Some("unknown".to_string()),
+        machine_id: None,
+        machine_runtime_state: None,
     };
     sshproxy::connect_bridge(
         &http,

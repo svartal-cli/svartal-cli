@@ -380,6 +380,70 @@ pub fn claude(
     open_detached_terminal(context, out, TerminalKind::Claude, &session, &target, terminal_id)
 }
 
+/// How long `sv` waits for a machine to come back, and how often it looks.
+///
+/// A snapshot restore plus a boot is minutes, not seconds, so this is generous.
+/// It shares the poll interval with `sv host up` because both are watching the
+/// same kind of thing: a machine on its way to being ready.
+const WAKE_WAIT_ATTEMPTS: u32 = 72;
+
+/// Starts the machine behind a workspace, if it is asleep, and waits for it.
+///
+/// A machine the platform stopped is not an error to report — it is a machine
+/// to start. Nothing is printed for a machine that is already up, so the
+/// ordinary case stays silent.
+fn ensure_machine_running(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    session: &Session,
+    target: &ShellTarget,
+) -> Result<(), CliError> {
+    if !target.needs_waking() {
+        return Ok(());
+    }
+    let Some(machine_id) = target.machine_id.as_deref() else {
+        return Ok(());
+    };
+    let label = target.machine_name.clone().unwrap_or_else(|| target.label.clone());
+
+    let mut ticket = crate::api::wake_machine(
+        context.http,
+        &context.config.api_base_url,
+        &session.access_token,
+        machine_id,
+    )
+    .map_err(CliError::of)?;
+
+    let mut last = String::new();
+    for _ in 0..WAKE_WAIT_ATTEMPTS {
+        let sentence = ticket.sentence(&label);
+        if sentence != last {
+            writeln!(out, "{sentence}").ok();
+            last = sentence;
+        }
+        if ticket.ready() {
+            return Ok(());
+        }
+        if !ticket.settling() {
+            return Err(CliError(format!(
+                "{}\nRun `sv machines` to see what state it is in.",
+                ticket.sentence(&label)
+            )));
+        }
+        std::thread::sleep(host_poll_interval());
+        ticket = crate::api::machine_activation(
+            context.http,
+            &context.config.api_base_url,
+            &session.access_token,
+            machine_id,
+        )
+        .map_err(CliError::of)?;
+    }
+    Err(CliError(format!(
+        "{label} is still not ready after several minutes. `sv machines` keeps watching it."
+    )))
+}
+
 /// Bare `sv` on a terminal: the list, then a shell on what was picked.
 ///
 /// Quitting the list is not a failure. Nothing was asked for and nothing went
@@ -412,6 +476,7 @@ fn open_detached_terminal(
     target: &ShellTarget,
     terminal_id: Option<&str>,
 ) -> Result<(), CliError> {
+    ensure_machine_running(context, out, session, target)?;
     let dpop_key =
         crate::dpop::load_or_create_key(&context.config.state_directory).map_err(CliError::of)?;
     let connection = crate::shell::connect_workspace(
@@ -599,6 +664,9 @@ where
     let alias = sshproxy::host_alias(target);
     let target = crate::target::select_shell_target(&view, &stored_shortnames(context), target)
         .map_err(CliError::of)?;
+    // stdout is the SSH byte stream here, so progress goes to stderr, which is
+    // exactly where `ssh` shows it to the person waiting.
+    ensure_machine_running(context, &mut std::io::stderr(), &session, &target)?;
 
     let key = sshproxy::ensure_client_key(&context.config.state_directory).map_err(CliError::of)?;
     let dpop_key =
@@ -722,6 +790,7 @@ where
     let (session, view) = load_session_and_view(context)?;
     let target = crate::target::select_target(&view, &stored_shortnames(context), target)
         .map_err(CliError::of)?;
+    ensure_machine_running(context, out, &session, &target)?;
 
     let dpop_key =
         crate::dpop::load_or_create_key(&context.config.state_directory).map_err(CliError::of)?;
