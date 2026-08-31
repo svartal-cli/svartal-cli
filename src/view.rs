@@ -16,6 +16,9 @@ pub struct WorkspaceRow {
     pub machine_id: String,
     pub machine_name: String,
     pub machine_presence: String,
+    /// Whether a server exists for the machine right now. None from an older
+    /// Svartal that does not report it.
+    pub machine_runtime_state: Option<String>,
     pub environment_id: String,
     pub label: String,
     pub kind: String,
@@ -61,6 +64,7 @@ pub fn build_machines_view(machines: &[Machine], links: &[LinkRecord]) -> Machin
                 machine_id: machine.id.clone(),
                 machine_name: machine.name.clone(),
                 machine_presence: present(Some(machine.presence.as_str()), "unknown"),
+                machine_runtime_state: machine.runtime_state.clone(),
                 environment_id: workspace.environment_id.clone(),
                 label: present(workspace.label.as_deref(), &workspace.environment_id),
                 kind: present(workspace.kind.as_deref(), "-"),

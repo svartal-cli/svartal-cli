@@ -29,6 +29,27 @@ pub struct ShellTarget {
     pub linked: bool,
     /// The machine's own heartbeat: `online`, `offline`, or `unknown`.
     pub machine_presence: Option<String>,
+    /// The id Svartal knows this machine by, when it is one this person can
+    /// list. Needed to ask for it to be started.
+    pub machine_id: Option<String>,
+    /// Whether a server exists for the machine right now: `running`,
+    /// `hibernated`, `waking`, `hibernating`, `failed`. None from an older
+    /// Svartal, which is read as running.
+    pub machine_runtime_state: Option<String>,
+}
+
+impl ShellTarget {
+    /// Whether this workspace's machine has to be started before connecting.
+    ///
+    /// A machine mid-transition counts too: it is on its way somewhere, and the
+    /// caller should wait for it rather than open a socket into nothing.
+    pub fn needs_waking(&self) -> bool {
+        self.machine_id.is_some()
+            && matches!(
+                self.machine_runtime_state.as_deref(),
+                Some("hibernated" | "waking" | "hibernating" | "failed")
+            )
+    }
 }
 
 #[derive(Debug)]
@@ -85,6 +106,8 @@ fn target_of_row(row: &WorkspaceRow) -> ShellTarget {
         machine_name: Some(row.machine_name.clone()),
         linked: row.linked,
         machine_presence: Some(row.machine_presence.clone()),
+        machine_id: Some(row.machine_id.clone()),
+        machine_runtime_state: row.machine_runtime_state.clone(),
     }
 }
 
@@ -98,6 +121,8 @@ pub fn shell_targets(view: &MachinesView) -> Vec<ShellTarget> {
             machine_name: None,
             linked: true,
             machine_presence: None,
+            machine_id: None,
+            machine_runtime_state: None,
         });
     }
     targets
@@ -230,6 +255,10 @@ pub fn select_target(
 /// A machine whose heartbeat says `offline` is refused; `unknown` is not. Most
 /// machines never report at all, so treating silence as "offline" would refuse
 /// almost every real connection.
+///
+/// A machine that is merely *asleep* is not refused either. The platform stops
+/// machines nobody is working on and keeps their disk; the caller starts it and
+/// waits, which is the whole point of `needs_waking`.
 pub fn select_shell_target(
     view: &MachinesView,
     shortnames: &Shortnames,
@@ -256,6 +285,12 @@ pub fn select_shell_target(
     };
     if !target.linked {
         return Err(TargetError::NotLinked { label: target.label });
+    }
+    // A stopped machine reads as offline five minutes after its last beat, so
+    // the runtime state has to be consulted before the heartbeat: otherwise the
+    // one machine we know how to start is the one we refuse.
+    if target.needs_waking() {
+        return Ok(target);
     }
     if target.machine_presence.as_deref() == Some("offline") {
         return Err(TargetError::MachineOffline { label: target.label });
