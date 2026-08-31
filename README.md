@@ -36,7 +36,7 @@ the source comments (`ID-9`, `ID-16`, `ID-25`, …) are that document's.
 | `close shell\|claude` | Ends the detached terminal instead of detaching from it, and says when nothing was running; `--terminal-id` too |
 | `add [pairing-url]`   | With a pairing URL: link the machine you run it on to your account, from the single-use URL its environment server prints at startup. Without one: how to connect a new machine, and the two safe ways to hand it a token. `--json`, `--origin`, `--publish-only`, `--print-token`, `--token-file` |
 | `name`                | Give a workspace a short word to type; `--remove` forgets one          |
-| `host up\|status\|down` | This computer as a Svartal machine: `up` registers it, starts the machine container (brok's host mode) and waits for your workspace; `status` and `down` do what they say; `--image`, `--purge` |
+| `host up\|status\|down` | This computer as a Svartal machine: `up` registers it, starts the machine container (brok's host mode) and waits for your workspace; `status` and `down` do what they say; more than one machine can run on the same computer, one per `--instance`; `--image`, `--instance`, `--purge` |
 | bare `sv`             | On a terminal: the environment list, arrow keys, enter opens a shell. Off a terminal it prints the usage and exits 1 |
 
 `claude` has been run against a live workspace: an interactive Claude terminal
@@ -178,6 +178,23 @@ The enrollment token never appears on a command line: it goes into a private
 started. `sv host status` shows the container and the workspace state;
 `sv host down` stops hosting and keeps the machine's identity so `up` resumes
 it; `--purge` deletes it.
+
+One computer can host more than one machine, which is how cross-machine
+behaviour is tried out without a second computer. `sv host up --instance m3b`
+starts a second machine beside the first: its own container
+(`svartal-host-m3b`), its own volumes (`svartal-host-m3b-config`,
+`svartal-host-m3b-state`, `svartal-run-m3b`), its own machine record on your
+account, and its own local record (`host-m3b.json`). The machine with no
+`--instance` keeps the names it always had, so a machine started before this
+existed is still the one `sv host up` finds. An instance name is 1 to 32
+characters long, starts with a lowercase letter or a digit, and holds only
+lowercase letters, digits and dashes.
+
+`sv host status` with no `--instance` lists every machine this computer has
+started, one block each; with one, it shows that machine alone. `sv host down`
+is the other way round: without `--instance` it stops the default machine and
+only that one, because stopping every machine on the computer should not be
+something you get by leaving a word out.
 
 ## Adding a machine
 

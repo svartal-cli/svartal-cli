@@ -33,6 +33,116 @@ pub const RUN_VOLUME: &str = "svartal-run";
 /// The file under the state directory that remembers which machine record
 /// this computer is, so `up` reuses it and `status`/`down` find it.
 pub const RECORD_FILE: &str = "host.json";
+pub const ENV_FILE: &str = "host.env";
+
+// ---------------------------------------------------------------------------
+// Instances.
+
+/// Which machine on this computer a command is about.
+///
+/// One computer can host more than one Svartal machine — the reason is
+/// testing what happens *between* machines without a second computer — and
+/// two machines that share a container name, a volume, or the local record
+/// would silently be one machine. So every name a machine owns is derived
+/// here and nowhere else.
+///
+/// The instance nobody named keeps the names the first release wrote, byte
+/// for byte, so a machine that is already running stays the same machine
+/// after an upgrade.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Instance {
+    name: Option<String>,
+}
+
+/// Said back to a person who typed a name this cannot use.
+pub const INSTANCE_NAME_RULE: &str = "An instance name is 1 to 32 characters long, starts with a lowercase letter or a digit, and holds only lowercase letters, digits and dashes.";
+
+impl Instance {
+    /// The machine a person who never typed `--instance` means.
+    pub fn default_instance() -> Self {
+        Self { name: None }
+    }
+
+    /// A `--instance` value, or `None` for the default machine. The shape is
+    /// checked here rather than by docker, because a name docker refuses
+    /// halfway through `up` would leave a machine record on the account with
+    /// no container to answer for it.
+    pub fn parse(name: Option<&str>) -> Result<Self, String> {
+        let Some(name) = name.map(str::trim) else {
+            return Ok(Self::default_instance());
+        };
+        let shape = name.len() <= 32
+            && name.starts_with(|character: char| character.is_ascii_lowercase() || character.is_ascii_digit())
+            && name.chars().all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-');
+        if !shape {
+            return Err(format!("`{name}` is not a name an instance can have. {INSTANCE_NAME_RULE}"));
+        }
+        Ok(Self { name: Some(name.to_string()) })
+    }
+
+    /// The instance a record file under the state directory belongs to, or
+    /// `None` when the file is not one of ours.
+    fn from_record_file(file_name: &str) -> Option<Self> {
+        if file_name == RECORD_FILE {
+            return Some(Self::default_instance());
+        }
+        let name = file_name.strip_prefix("host-")?.strip_suffix(".json")?;
+        Self::parse(Some(name)).ok()
+    }
+
+    /// The name a person typed, or `None` for the default machine.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    fn derived(&self, default: &str, stem: &str, tail: &str) -> String {
+        match &self.name {
+            None => default.to_string(),
+            Some(name) => format!("{stem}-{name}{tail}"),
+        }
+    }
+
+    pub fn container(&self) -> String {
+        self.derived(CONTAINER_NAME, CONTAINER_NAME, "")
+    }
+
+    pub fn config_volume(&self) -> String {
+        self.derived(CONFIG_VOLUME, CONTAINER_NAME, "-config")
+    }
+
+    pub fn state_volume(&self) -> String {
+        self.derived(STATE_VOLUME, CONTAINER_NAME, "-state")
+    }
+
+    pub fn run_volume(&self) -> String {
+        self.derived(RUN_VOLUME, RUN_VOLUME, "")
+    }
+
+    pub fn record_file(&self) -> String {
+        self.derived(RECORD_FILE, "host", ".json")
+    }
+
+    pub fn env_file(&self) -> String {
+        self.derived(ENV_FILE, "host", ".env")
+    }
+}
+
+/// Every machine this computer knows about, default first: one per record
+/// file `up` has written. This is what `sv host status` without `--instance`
+/// walks, so a machine started with `--instance` is never lost by forgetting
+/// the word it was started with.
+pub fn known_instances(state_directory: &Path) -> Vec<Instance> {
+    let Ok(entries) = std::fs::read_dir(state_directory) else {
+        return Vec::new();
+    };
+    let mut instances: Vec<Instance> = entries
+        .flatten()
+        .filter_map(|entry| Instance::from_record_file(entry.file_name().to_str()?))
+        .collect();
+    instances.sort();
+    instances.dedup();
+    instances
+}
 
 // ---------------------------------------------------------------------------
 // Docker.
@@ -96,9 +206,9 @@ pub fn engine_ready(docker: &dyn Docker) -> Result<(), String> {
     Err("Docker is not running on this computer. Start Docker Desktop (or OrbStack, or the docker engine) and run `sv host up` again.".to_string())
 }
 
-/// Whether the host container exists, and whether it is running.
-pub fn container_state(docker: &dyn Docker) -> Result<Option<bool>, String> {
-    let output = docker.run(&args(&["inspect", "--format", "{{.State.Running}}", CONTAINER_NAME]), None)?;
+/// Whether this instance's host container exists, and whether it is running.
+pub fn container_state(docker: &dyn Docker, instance: &Instance) -> Result<Option<bool>, String> {
+    let output = docker.run(&args(&["inspect", "--format", "{{.State.Running}}", &instance.container()]), None)?;
     if !output.success {
         return Ok(None);
     }
@@ -290,22 +400,22 @@ pub struct HostRecord {
     pub image: String,
 }
 
-pub fn read_record(state_directory: &Path) -> Option<HostRecord> {
-    let bytes = crate::fsutil::read_private_file(&state_directory.join(RECORD_FILE), 65_536).ok()??;
+pub fn read_record(state_directory: &Path, instance: &Instance) -> Option<HostRecord> {
+    let bytes = crate::fsutil::read_private_file(&state_directory.join(instance.record_file()), 65_536).ok()??;
     serde_json::from_slice(&bytes).ok()
 }
 
-pub fn write_record(state_directory: &Path, record: &HostRecord) -> Result<(), String> {
+pub fn write_record(state_directory: &Path, instance: &Instance, record: &HostRecord) -> Result<(), String> {
     crate::fsutil::ensure_state_directory(state_directory).map_err(|error| error.to_string())?;
     crate::fsutil::write_private_file(
-        &state_directory.join(RECORD_FILE),
+        &state_directory.join(instance.record_file()),
         serde_json::to_string_pretty(record).unwrap_or_default().as_bytes(),
     )
     .map_err(|error| error.to_string())
 }
 
-pub fn remove_record(state_directory: &Path) {
-    let _ = crate::fsutil::remove_file(&state_directory.join(RECORD_FILE));
+pub fn remove_record(state_directory: &Path, instance: &Instance) {
+    let _ = crate::fsutil::remove_file(&state_directory.join(instance.record_file()));
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +423,7 @@ pub fn remove_record(state_directory: &Path) {
 
 /// Everything the host container is started with.
 pub struct HostPlan<'a> {
+    pub instance: &'a Instance,
     pub image: &'a str,
     pub machine_id: &'a str,
     pub enrollment_token: &'a str,
@@ -327,9 +438,21 @@ pub struct HostPlan<'a> {
 /// enrollment token is written, and it is deleted the moment the container
 /// has started.
 pub fn env_file_body(plan: &HostPlan<'_>) -> String {
+    // The machine mounts its own volumes into the containers it creates —
+    // the runners' credential homes out of the state volume, the broker
+    // socket out of the run volume — and it can only name them if it is told
+    // which ones are its. A second machine handed the first one's names
+    // would quietly share both.
     let mut body = format!(
-        "SVARTAL_MACHINE_ID={}\nSVARTAL_ENROLLMENT_TOKEN={}\nSVARTAL_MANAGED_IMAGE_REF={}\nSVARTAL_BROKER_API_BASE_URL={}\nT3CODE_RELAY_URL={}\nT3CODE_CLOUD_ISSUER={}\n",
-        plan.machine_id, plan.enrollment_token, plan.managed_image_ref, plan.api_base_url, plan.relay_url, plan.issuer,
+        "SVARTAL_MACHINE_ID={}\nSVARTAL_ENROLLMENT_TOKEN={}\nSVARTAL_MANAGED_IMAGE_REF={}\nSVARTAL_BROKER_API_BASE_URL={}\nT3CODE_RELAY_URL={}\nT3CODE_CLOUD_ISSUER={}\nSVARTAL_STATE_VOLUME={}\nSVARTAL_RUN_VOLUME={}\n",
+        plan.machine_id,
+        plan.enrollment_token,
+        plan.managed_image_ref,
+        plan.api_base_url,
+        plan.relay_url,
+        plan.issuer,
+        plan.instance.state_volume(),
+        plan.instance.run_volume(),
     );
     if plan.registry_auth {
         body.push_str("SVARTAL_REGISTRY_AUTH_REQUIRED=true\nSVARTAL_REGISTRY_HOST=ghcr.io\nDOCKER_CONFIG=/etc/svartal/docker\n");
@@ -338,22 +461,22 @@ pub fn env_file_body(plan: &HostPlan<'_>) -> String {
 }
 
 /// The `docker run` for the host container. Pure, so a test can pin it.
-pub fn run_args(image: &str, env_file: &Path) -> Vec<String> {
+pub fn run_args(instance: &Instance, image: &str, env_file: &Path) -> Vec<String> {
     args(&[
         "run",
         "-d",
         "--name",
-        CONTAINER_NAME,
+        &instance.container(),
         "--restart",
         "unless-stopped",
         "-v",
         "/var/run/docker.sock:/var/run/docker.sock",
         "-v",
-        &format!("{CONFIG_VOLUME}:/etc/svartal"),
+        &format!("{}:/etc/svartal", instance.config_volume()),
         "-v",
-        &format!("{STATE_VOLUME}:/var/lib/svartal"),
+        &format!("{}:/var/lib/svartal", instance.state_volume()),
         "-v",
-        &format!("{RUN_VOLUME}:/run/svartal"),
+        &format!("{}:/run/svartal", instance.run_volume()),
         "--env-file",
         &env_file.to_string_lossy(),
         image,
@@ -362,7 +485,7 @@ pub fn run_args(image: &str, env_file: &Path) -> Vec<String> {
 
 /// Copy the registry credential into the config volume, through stdin, using
 /// the host image itself as the helper (it is alpine, and already pulled).
-pub fn install_registry_auth(docker: &dyn Docker, image: &str, auth: &str) -> Result<(), String> {
+pub fn install_registry_auth(docker: &dyn Docker, instance: &Instance, image: &str, auth: &str) -> Result<(), String> {
     let output = docker.run(
         &args(&[
             "run",
@@ -371,7 +494,7 @@ pub fn install_registry_auth(docker: &dyn Docker, image: &str, auth: &str) -> Re
             "--entrypoint",
             "sh",
             "-v",
-            &format!("{CONFIG_VOLUME}:/etc/svartal"),
+            &format!("{}:/etc/svartal", instance.config_volume()),
             image,
             "-c",
             "umask 077 && mkdir -p /etc/svartal/docker && cat >/etc/svartal/docker/config.json",
@@ -386,9 +509,9 @@ pub fn install_registry_auth(docker: &dyn Docker, image: &str, auth: &str) -> Re
 }
 
 /// The last lines of the host container's log, for a failure message.
-pub fn recent_logs(docker: &dyn Docker) -> String {
+pub fn recent_logs(docker: &dyn Docker, instance: &Instance) -> String {
     docker
-        .run(&args(&["logs", "--tail", "12", CONTAINER_NAME]), None)
+        .run(&args(&["logs", "--tail", "12", &instance.container()]), None)
         .map(|output| {
             let mut text = output.stdout;
             if !output.stderr.is_empty() {
@@ -447,6 +570,24 @@ pub fn machine_name(hostname: Option<&str>) -> String {
     if name.is_empty() { "my-computer".to_string() } else { name }
 }
 
+/// The machine name an `up` with no `--name` uses.
+///
+/// A second machine on the same computer carries its instance in the name:
+/// the two records are told apart by their ids, but a person reading
+/// `sv envs` sees names, and two rows called `Marcs-MacBook` are two rows
+/// nobody can choose between.
+pub fn machine_name_for(instance: &Instance, hostname: Option<&str>) -> String {
+    let base = machine_name(hostname);
+    match instance.name() {
+        None => base,
+        Some(name) => {
+            let room = 64usize.saturating_sub(name.len() + 1);
+            let base: String = base.chars().take(room).collect();
+            format!("{}-{name}", base.trim_end_matches('-'))
+        }
+    }
+}
+
 pub fn local_hostname() -> Option<String> {
     let mut buffer = [0u8; 256];
     // SAFETY: gethostname writes at most len bytes into the buffer.
@@ -469,7 +610,7 @@ mod tests {
 
     #[test]
     fn the_run_has_the_four_mounts_and_no_secret_in_argv() {
-        let run = run_args("ghcr.io/x/svartal-host:latest", Path::new("/tmp/host.env"));
+        let run = run_args(&Instance::default_instance(), "ghcr.io/x/svartal-host:latest", Path::new("/tmp/host.env"));
         assert_eq!(run[0..4], ["run", "-d", "--name", "svartal-host"]);
         assert!(run.contains(&"/var/run/docker.sock:/var/run/docker.sock".to_string()));
         assert!(run.contains(&"svartal-host-config:/etc/svartal".to_string()));
@@ -480,8 +621,55 @@ mod tests {
     }
 
     #[test]
+    fn the_default_instance_keeps_the_names_the_first_release_wrote() {
+        let default = Instance::default_instance();
+        assert_eq!(default.container(), CONTAINER_NAME);
+        assert_eq!(default.config_volume(), CONFIG_VOLUME);
+        assert_eq!(default.state_volume(), STATE_VOLUME);
+        assert_eq!(default.run_volume(), RUN_VOLUME);
+        assert_eq!(default.record_file(), RECORD_FILE);
+        assert_eq!(default.env_file(), ENV_FILE);
+        assert_eq!(Instance::parse(None), Ok(default));
+
+        let named = Instance::parse(Some("m3b")).unwrap();
+        assert_eq!(named.container(), "svartal-host-m3b");
+        assert_eq!(named.config_volume(), "svartal-host-m3b-config");
+        assert_eq!(named.state_volume(), "svartal-host-m3b-state");
+        assert_eq!(named.run_volume(), "svartal-run-m3b");
+        assert_eq!(named.record_file(), "host-m3b.json");
+        assert_eq!(named.env_file(), "host-m3b.env");
+    }
+
+    #[test]
+    fn an_instance_name_is_a_lowercase_word_and_nothing_else() {
+        assert!(Instance::parse(Some("m3b")).is_ok());
+        assert!(Instance::parse(Some("a")).is_ok());
+        assert!(Instance::parse(Some("second-mac-9")).is_ok());
+        assert!(Instance::parse(Some(&"x".repeat(32))).is_ok());
+        for refused in ["", "-b", "M3B", "my instance", "b_2", "b.2", "über", &"x".repeat(33)] {
+            let error = Instance::parse(Some(refused)).unwrap_err();
+            assert!(error.contains(INSTANCE_NAME_RULE), "{error}");
+        }
+    }
+
+    #[test]
+    fn every_record_file_in_the_state_directory_is_an_instance() {
+        let directory = std::env::temp_dir().join(format!("sv-host-instances-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        for file in ["host.json", "host-m3b.json", "host-a.json", "host.env", "host-m3b.env", "shortnames.json", "host-Bad.json"] {
+            std::fs::write(directory.join(file), "{}").unwrap();
+        }
+        let found: Vec<Option<String>> =
+            known_instances(&directory).iter().map(|instance| instance.name().map(str::to_string)).collect();
+        assert_eq!(found, vec![None, Some("a".to_string()), Some("m3b".to_string())]);
+        assert!(known_instances(&directory.join("missing")).is_empty());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn the_env_file_carries_the_token_and_the_registry_switch() {
         let plan = HostPlan {
+            instance: &Instance::default_instance(),
             image: "img",
             machine_id: "m-1",
             enrollment_token: "svartal-enroll-secret",
@@ -495,6 +683,12 @@ mod tests {
         assert!(body.contains("SVARTAL_ENROLLMENT_TOKEN=svartal-enroll-secret\n"));
         assert!(body.contains("SVARTAL_MANAGED_IMAGE_REF=ghcr.io/x/k3@sha256:abc\n"));
         assert!(body.contains("DOCKER_CONFIG=/etc/svartal/docker\n"));
+        assert!(body.contains("SVARTAL_STATE_VOLUME=svartal-host-state\n"));
+        assert!(body.contains("SVARTAL_RUN_VOLUME=svartal-run\n"));
+        let named = Instance::parse(Some("m3b")).unwrap();
+        let named_body = env_file_body(&HostPlan { instance: &named, ..plan });
+        assert!(named_body.contains("SVARTAL_STATE_VOLUME=svartal-host-m3b-state\n"), "{named_body}");
+        assert!(named_body.contains("SVARTAL_RUN_VOLUME=svartal-run-m3b\n"), "{named_body}");
         let plan = HostPlan { registry_auth: false, ..plan };
         assert!(!env_file_body(&plan).contains("DOCKER_CONFIG"));
     }
@@ -505,6 +699,15 @@ mod tests {
         assert_eq!(machine_name(Some("  ")), "my-computer");
         assert_eq!(machine_name(None), "my-computer");
         assert_eq!(machine_name(Some("bad name!")), "badname");
+    }
+
+    #[test]
+    fn a_second_machine_on_this_computer_is_named_after_its_instance() {
+        let default = Instance::default_instance();
+        let named = Instance::parse(Some("m3b")).unwrap();
+        assert_eq!(machine_name_for(&default, Some("Marcs-MacBook.local")), "Marcs-MacBook");
+        assert_eq!(machine_name_for(&named, Some("Marcs-MacBook.local")), "Marcs-MacBook-m3b");
+        assert_eq!(machine_name_for(&named, Some(&"x".repeat(100))).len(), 64);
     }
 
     #[test]

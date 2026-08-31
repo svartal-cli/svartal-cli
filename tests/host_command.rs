@@ -9,6 +9,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use serde_json::{Value, json};
@@ -31,7 +32,7 @@ struct FakeDocker {
     calls: Mutex<Vec<Vec<String>>>,
     stdin: Mutex<Vec<String>>,
     env_files: Mutex<Vec<String>>,
-    running: Mutex<Option<bool>>,
+    containers: Mutex<BTreeMap<String, bool>>,
     engine_up: bool,
 }
 
@@ -41,13 +42,22 @@ impl FakeDocker {
             calls: Mutex::new(Vec::new()),
             stdin: Mutex::new(Vec::new()),
             env_files: Mutex::new(Vec::new()),
-            running: Mutex::new(None),
+            containers: Mutex::new(BTreeMap::new()),
             engine_up,
         }
     }
 
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().iter().map(|call| call.join(" ")).collect()
+    }
+
+    /// A container the engine already has before the command runs.
+    fn already_running(&self, container: &str) {
+        self.containers.lock().unwrap().insert(container.to_string(), true);
+    }
+
+    fn container_names(&self) -> Vec<String> {
+        self.containers.lock().unwrap().keys().cloned().collect()
     }
 }
 
@@ -61,14 +71,17 @@ impl Docker for FakeDocker {
         match args.first().map(String::as_str) {
             Some("info") if self.engine_up => ok("29.4.0\n"),
             Some("info") => Ok(DockerOutput { success: false, stdout: String::new(), stderr: "Cannot connect to the Docker daemon".into() }),
-            Some("inspect") => match *self.running.lock().unwrap() {
+            // Every container is looked up by name, because two machines on
+            // one computer are two containers.
+            Some("inspect") => match args.last().and_then(|name| self.containers.lock().unwrap().get(name).copied()) {
                 Some(running) => ok(if running { "true\n" } else { "false\n" }),
                 None => Ok(DockerOutput { success: false, stdout: String::new(), stderr: "No such object".into() }),
             },
             Some("pull") => ok("Status: Downloaded"),
             Some("rm") => {
-                *self.running.lock().unwrap() = None;
-                ok("svartal-host\n")
+                let name = args.last().cloned().unwrap_or_default();
+                self.containers.lock().unwrap().remove(&name);
+                ok(&format!("{name}\n"))
             }
             Some("run") if args.contains(&"--entrypoint".to_string()) => ok(""),
             Some("run") => {
@@ -79,7 +92,13 @@ impl Docker for FakeDocker {
                     .map(|path| std::fs::read_to_string(path).unwrap_or_default())
                     .unwrap_or_default();
                 self.env_files.lock().unwrap().push(env_file);
-                *self.running.lock().unwrap() = Some(true);
+                let name = args
+                    .iter()
+                    .position(|argument| argument == "--name")
+                    .and_then(|index| args.get(index + 1))
+                    .cloned()
+                    .unwrap_or_default();
+                self.containers.lock().unwrap().insert(name, true);
                 ok("c0ffee\n")
             }
             Some("logs") => ok("{\"event\":\"host_serving\"}\n"),
@@ -209,7 +228,7 @@ fn up_registers_starts_the_container_and_waits_for_the_workspace() {
     let dir = TempDir::new("host-up");
     let docker = FakeDocker::new(true);
     let run = run(true, &docker, vec!["requested", "provisioning", "ready"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, None, Some("ghcr.io/x/svartal-host:test"))
+        commands::host_up(context, out, docker, None, Some("ghcr.io/x/svartal-host:test"), None)
     });
     run.outcome.unwrap();
     assert!(run.output.contains("Registering this computer with Svartal as "), "{}", run.output);
@@ -256,7 +275,7 @@ fn up_registers_starts_the_container_and_waits_for_the_workspace() {
     assert!(docker.stdin.lock().unwrap().is_empty());
 
     // The machine is remembered for next time.
-    let record = host::read_record(&dir.path().join("config")).expect("a host record");
+    let record = host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).expect("a host record");
     assert_eq!(record.machine_id, MACHINE_ID);
     assert_eq!(record.image, "ghcr.io/x/svartal-host:test");
 }
@@ -266,13 +285,14 @@ fn a_second_up_reuses_the_machine_and_replaces_the_container() {
     let dir = TempDir::new("host-up-again");
     host::write_record(
         &dir.path().join("config"),
+        &host::Instance::default_instance(),
         &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), image: "ghcr.io/x/svartal-host:test".into() },
     )
     .unwrap();
     let docker = FakeDocker::new(true);
-    *docker.running.lock().unwrap() = Some(true);
+    docker.already_running(host::CONTAINER_NAME);
     let run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, None, None)
+        commands::host_up(context, out, docker, None, None, None)
     });
     run.outcome.unwrap();
     assert_eq!(run.posted[0]["machine_id"], MACHINE_ID);
@@ -291,7 +311,7 @@ fn a_registry_login_on_this_computer_is_copied_into_the_machine() {
     std::fs::write(dir.path().join(".docker/config.json"), r#"{"auths":{"ghcr.io":{"auth":"dXNlcjpwYXQ="}}}"#).unwrap();
     let docker = FakeDocker::new(true);
     let run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, None, Some("ghcr.io/x/svartal-host:test"))
+        commands::host_up(context, out, docker, None, Some("ghcr.io/x/svartal-host:test"), None)
     });
     run.outcome.unwrap();
     let stdin = docker.stdin.lock().unwrap().clone();
@@ -309,7 +329,7 @@ fn a_failed_workspace_names_the_cause_and_the_log() {
     let dir = TempDir::new("host-up-failed");
     let docker = FakeDocker::new(true);
     let run = run(true, &docker, vec!["requested", "failed"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, None, Some("img"))
+        commands::host_up(context, out, docker, None, Some("img"), None)
     });
     let error = run.outcome.unwrap_err().to_string();
     assert!(error.contains("host_capacity_disk"), "{error}");
@@ -321,16 +341,16 @@ fn a_failed_workspace_names_the_cause_and_the_log() {
 fn no_engine_no_release_and_no_session_each_get_their_sentence() {
     let dir = TempDir::new("host-up-refusals");
     let down = FakeDocker::new(false);
-    let run_down = run(true, &down, vec![], true, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None, None));
+    let run_down = run(true, &down, vec![], true, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None, None, None));
     assert!(run_down.outcome.unwrap_err().to_string().contains("Docker is not running"));
     assert!(run_down.posted.is_empty(), "registered a machine with no engine");
 
     let up = FakeDocker::new(true);
-    let run_none = run(true, &up, vec![], false, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None, None));
+    let run_none = run(true, &up, vec![], false, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None, None, None));
     assert!(run_none.outcome.unwrap_err().to_string().contains("no published workspace image"));
     assert!(!up.calls().iter().any(|call| call.starts_with("run")), "started a machine with nothing to run");
 
-    let run_out = run(false, &up, vec![], true, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None, None));
+    let run_out = run(false, &up, vec![], true, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None, None, None));
     assert_eq!(run_out.outcome.unwrap_err().to_string(), commands::NOT_SIGNED_IN);
 }
 
@@ -338,30 +358,31 @@ fn no_engine_no_release_and_no_session_each_get_their_sentence() {
 fn status_and_down_read_the_record_and_purge_deletes_it() {
     let dir = TempDir::new("host-status-down");
     let docker = FakeDocker::new(true);
-    let run_before = run(true, &docker, vec![], true, dir.path(), |context, out, docker| commands::host_status(context, out, docker));
+    let run_before = run(true, &docker, vec![], true, dir.path(), |context, out, docker| commands::host_status(context, out, docker, None));
     run_before.outcome.unwrap();
     assert!(run_before.output.contains("not a Svartal machine"), "{}", run_before.output);
 
     host::write_record(
         &dir.path().join("config"),
+        &host::Instance::default_instance(),
         &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), image: "img".into() },
     )
     .unwrap();
-    *docker.running.lock().unwrap() = Some(true);
-    let run_status = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| commands::host_status(context, out, docker));
+    docker.already_running(host::CONTAINER_NAME);
+    let run_status = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| commands::host_status(context, out, docker, None));
     run_status.outcome.unwrap();
     assert!(run_status.output.contains("container svartal-host is running"), "{}", run_status.output);
     assert!(run_status.output.contains("Your workspace is ready."), "{}", run_status.output);
     assert!(run_status.output.contains("environment-1234"), "{}", run_status.output);
 
-    let run_down = run(true, &docker, vec![], true, dir.path(), |context, out, docker| commands::host_down(context, out, docker, false));
+    let run_down = run(true, &docker, vec![], true, dir.path(), |context, out, docker| commands::host_down(context, out, docker, false, None));
     run_down.outcome.unwrap();
     assert!(run_down.output.contains("removed"), "{}", run_down.output);
-    assert!(host::read_record(&dir.path().join("config")).is_some(), "a plain down forgot the machine");
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some(), "a plain down forgot the machine");
 
-    let run_purge = run(true, &docker, vec![], true, dir.path(), |context, out, docker| commands::host_down(context, out, docker, true));
+    let run_purge = run(true, &docker, vec![], true, dir.path(), |context, out, docker| commands::host_down(context, out, docker, true, None));
     run_purge.outcome.unwrap();
-    assert!(host::read_record(&dir.path().join("config")).is_none(), "purge kept the record");
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_none(), "purge kept the record");
     let calls = docker.calls();
     for volume in ["svartal-host-config", "svartal-host-state", "svartal-run"] {
         assert!(calls.iter().any(|call| call == &format!("volume rm -f {volume}")), "{calls:?}");
@@ -387,7 +408,7 @@ fn a_pull_that_fails_leaves_no_machine_on_the_account() {
     }
     let docker = NoImage(FakeDocker::new(true));
     let run = run(true, &docker.0, vec!["ready"], true, dir.path(), |context, out, _| {
-        commands::host_up(context, out, &docker, None, Some("ghcr.io/x/svartal-host:test"))
+        commands::host_up(context, out, &docker, None, Some("ghcr.io/x/svartal-host:test"), None)
     });
     let error = run.outcome.unwrap_err().to_string();
     assert!(error.contains("Could not pull"), "{error}");
@@ -395,7 +416,7 @@ fn a_pull_that_fails_leaves_no_machine_on_the_account() {
     // Nothing was created: no registration call, no local record.
     assert!(run.posted.is_empty(), "a machine was registered for a run that could not start");
     assert!(!run.urls.iter().any(|url| url.contains("host-machines")), "{:?}", run.urls);
-    assert!(host::read_record(&dir.path().join("config")).is_none());
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_none());
 }
 
 #[test]
@@ -403,7 +424,7 @@ fn a_given_name_reaches_svartal_and_is_cleaned_first() {
     let dir = TempDir::new("host-up-name");
     let docker = FakeDocker::new(true);
     let first_run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, Some("  work laptop\n "), Some("img"))
+        commands::host_up(context, out, docker, Some("  work laptop\n "), Some("img"), None)
     });
     first_run.outcome.unwrap();
     assert_eq!(first_run.posted[0]["name"], "work laptop");
@@ -411,14 +432,167 @@ fn a_given_name_reaches_svartal_and_is_cleaned_first() {
     // A later run without --name keeps the recorded name, and one with a new
     // name sends it alongside the machine id, which is how a rename happens.
     let again_run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, None, Some("img"))
+        commands::host_up(context, out, docker, None, Some("img"), None)
     });
     again_run.outcome.unwrap();
     assert_eq!(again_run.posted[0]["name"], "work laptop", "the recorded name must survive a plain up");
     let renamed_run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
-        commands::host_up(context, out, docker, Some("kitchen mac"), Some("img"))
+        commands::host_up(context, out, docker, Some("kitchen mac"), Some("img"), None)
     });
     renamed_run.outcome.unwrap();
     assert_eq!(renamed_run.posted[0]["name"], "kitchen mac");
     assert_eq!(renamed_run.posted[0]["machine_id"], MACHINE_ID);
+}
+
+/// Two machines on one computer is the reason `--instance` exists, so what
+/// these pin is separation: a named machine touches nothing the default one
+/// owns, and neither can be reached by leaving the word out.
+fn record(dir: &TempDir, instance: &host::Instance, machine_name: &str) {
+    host::write_record(
+        &dir.path().join("config"),
+        instance,
+        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: machine_name.into(), image: "img".into() },
+    )
+    .unwrap();
+}
+
+fn instance(name: &str) -> host::Instance {
+    host::Instance::parse(Some(name)).unwrap()
+}
+
+#[test]
+fn a_named_instance_gets_its_own_container_volumes_and_record() {
+    let dir = TempDir::new("host-up-instance");
+    let docker = FakeDocker::new(true);
+    let run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), Some("m3b"))
+    });
+    run.outcome.unwrap();
+    let started = docker.calls().into_iter().find(|call| call.starts_with("run -d")).expect("a run");
+    for part in [
+        "--name svartal-host-m3b --restart unless-stopped",
+        "-v svartal-host-m3b-config:/etc/svartal",
+        "-v svartal-host-m3b-state:/var/lib/svartal",
+        "-v svartal-run-m3b:/run/svartal",
+    ] {
+        assert!(started.contains(part), "{started}");
+    }
+    assert!(run.output.contains("container svartal-host-m3b"), "{}", run.output);
+
+    // The machine mounts these volumes into the containers it creates, so the
+    // names it is told have to be its own.
+    let env_files = docker.env_files.lock().unwrap().clone();
+    assert!(env_files[0].contains("SVARTAL_STATE_VOLUME=svartal-host-m3b-state\n"), "{}", env_files[0]);
+    assert!(env_files[0].contains("SVARTAL_RUN_VOLUME=svartal-run-m3b\n"), "{}", env_files[0]);
+
+    // The record is the named one, and the default machine's is untouched.
+    assert!(dir.path().join("config/host-m3b.json").exists());
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_none());
+    assert_eq!(
+        host::read_record(&dir.path().join("config"), &instance("m3b")).map(|record| record.machine_id),
+        Some(MACHINE_ID.to_string())
+    );
+}
+
+#[test]
+fn starting_a_second_machine_leaves_the_first_ones_container_alone() {
+    let dir = TempDir::new("host-up-second");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    let docker = FakeDocker::new(true);
+    docker.already_running(host::CONTAINER_NAME);
+    let run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), Some("b"))
+    });
+    run.outcome.unwrap();
+    let calls = docker.calls();
+    assert!(!calls.iter().any(|call| call == "rm -f svartal-host"), "the default machine was replaced: {calls:?}");
+    assert_eq!(docker.container_names(), vec!["svartal-host".to_string(), "svartal-host-b".to_string()]);
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
+    assert!(host::read_record(&dir.path().join("config"), &instance("b")).is_some());
+}
+
+#[test]
+fn an_instance_name_sv_cannot_use_is_refused_before_anything_happens() {
+    let dir = TempDir::new("host-instance-refused");
+    for name in ["M3B", "two words", "-leading", "", "under_score"] {
+        let docker = FakeDocker::new(true);
+        for outcome in [
+            run(true, &docker, vec![], true, dir.path(), |context, out, docker| {
+                commands::host_up(context, out, docker, None, Some("img"), Some(name))
+            }),
+            run(true, &docker, vec![], true, dir.path(), |context, out, docker| {
+                commands::host_status(context, out, docker, Some(name))
+            }),
+            run(true, &docker, vec![], true, dir.path(), |context, out, docker| {
+                commands::host_down(context, out, docker, false, Some(name))
+            }),
+        ] {
+            let error = outcome.outcome.unwrap_err().to_string();
+            assert!(error.contains(host::INSTANCE_NAME_RULE), "{error}");
+            assert!(outcome.urls.is_empty(), "`{name}` reached Svartal: {:?}", outcome.urls);
+        }
+        assert!(docker.calls().is_empty(), "`{name}` reached docker: {:?}", docker.calls());
+    }
+}
+
+#[test]
+fn status_lists_every_machine_on_this_computer_and_one_when_asked() {
+    let dir = TempDir::new("host-status-instances");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    record(&dir, &instance("m3b"), "second-machine");
+    let docker = FakeDocker::new(true);
+    docker.already_running(host::CONTAINER_NAME);
+    docker.already_running("svartal-host-m3b");
+
+    let all = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_status(context, out, docker, None)
+    });
+    all.outcome.unwrap();
+    assert!(all.output.contains("Machine laptop (") && all.output.contains("container svartal-host is running."), "{}", all.output);
+    assert!(
+        all.output.contains("Machine second-machine (") && all.output.contains("on instance m3b: container svartal-host-m3b is running."),
+        "{}",
+        all.output
+    );
+
+    let one = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_status(context, out, docker, Some("m3b"))
+    });
+    one.outcome.unwrap();
+    assert!(one.output.contains("container svartal-host-m3b is running."), "{}", one.output);
+    assert!(!one.output.contains("container svartal-host is running."), "{}", one.output);
+
+    // A machine that was never started here is said so in its own words.
+    let missing = run(true, &docker, vec![], true, dir.path(), |context, out, docker| {
+        commands::host_status(context, out, docker, Some("nope"))
+    });
+    missing.outcome.unwrap();
+    assert!(missing.output.contains("`sv host up --instance nope`"), "{}", missing.output);
+}
+
+#[test]
+fn down_with_an_instance_removes_only_that_machine() {
+    let dir = TempDir::new("host-down-instance");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    record(&dir, &instance("m3b"), "second-machine");
+    let docker = FakeDocker::new(true);
+    docker.already_running(host::CONTAINER_NAME);
+    docker.already_running("svartal-host-m3b");
+
+    let down = run(true, &docker, vec![], true, dir.path(), |context, out, docker| {
+        commands::host_down(context, out, docker, true, Some("m3b"))
+    });
+    down.outcome.unwrap();
+    let calls = docker.calls();
+    assert!(calls.iter().any(|call| call == "rm -f svartal-host-m3b"), "{calls:?}");
+    assert!(!calls.iter().any(|call| call == "rm -f svartal-host"), "the default machine was removed too: {calls:?}");
+    assert_eq!(docker.container_names(), vec!["svartal-host".to_string()]);
+    for volume in ["svartal-host-m3b-config", "svartal-host-m3b-state", "svartal-run-m3b"] {
+        assert!(calls.iter().any(|call| call == &format!("volume rm -f {volume}")), "{calls:?}");
+    }
+    for volume in ["svartal-host-config", "svartal-host-state", "svartal-run"] {
+        assert!(!calls.iter().any(|call| call == &format!("volume rm -f {volume}")), "{calls:?}");
+    }
+    assert!(host::read_record(&dir.path().join("config"), &instance("m3b")).is_none());
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
 }
