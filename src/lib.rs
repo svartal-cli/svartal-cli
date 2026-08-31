@@ -32,6 +32,7 @@ pub mod shell;
 pub mod shortnames;
 pub mod sshproxy;
 pub mod store;
+pub mod swap;
 pub mod target;
 pub mod terminal;
 pub mod view;

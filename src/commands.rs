@@ -984,6 +984,10 @@ pub fn host_up(
     let instance = host::Instance::parse(instance).map_err(CliError)?;
     let session = context.current_session()?;
     host::engine_ready(docker).map_err(CliError)?;
+    // Before the machine exists, while the person is still here to answer:
+    // whether this computer has anywhere to page memory out to. It never
+    // refuses — a machine without swap is worse, not impossible.
+    crate::swap::preflight(out, crate::terminal::is_interactive());
     let state = context.config.state_directory.clone();
     let existing = host::read_record(&state, &instance);
     let image = image_override
