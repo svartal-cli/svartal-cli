@@ -211,8 +211,6 @@ fn target_of(fixture: &Value) -> ShellTarget {
         machine_name: Some(fixture["target"]["machineName"].as_str().unwrap().to_string()),
         linked: true,
         machine_presence: Some("unknown".to_string()),
-        machine_id: None,
-        machine_runtime_state: None,
     }
 }
 
