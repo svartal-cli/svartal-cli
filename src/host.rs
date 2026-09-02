@@ -280,6 +280,34 @@ pub struct HostRelease {
     pub image_ref: String,
     #[serde(default)]
     pub version: Option<String>,
+    #[serde(default)]
+    pub component: Option<String>,
+}
+
+/// What Svartal knows about this machine's own software: the version the
+/// host reported, the newest one in the catalogue, and whether the host is
+/// the kind that fetches its own updates. `None` from a server that predates
+/// host self-update, or for a machine that is not a host.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostUpdate {
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub image_ref: Option<String>,
+    /// When the host last asked Svartal for updates; `None` when it never has.
+    #[serde(default)]
+    pub deployments_pulled_at: Option<String>,
+    #[serde(default)]
+    pub up_to_date: bool,
+    #[serde(default)]
+    pub update_available: bool,
+    #[serde(default)]
+    pub self_updating: bool,
+    /// Written by the server when the machine is online but its host never
+    /// asks — host software older than self-update.
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -309,6 +337,12 @@ pub struct HostRegistration {
     pub workspace_intent: Option<HostIntent>,
     #[serde(default)]
     pub release: Option<HostRelease>,
+    /// The newest host image in the catalogue — the machine's own software,
+    /// as opposed to `release`, which is the workspace image.
+    #[serde(default)]
+    pub host_release: Option<HostRelease>,
+    #[serde(default)]
+    pub host_update: Option<HostUpdate>,
 }
 
 fn parse_registration(body: Value, action: &str) -> Result<HostRegistration, ApiError> {
@@ -522,6 +556,93 @@ pub fn recent_logs(docker: &dyn Docker, instance: &Instance) -> String {
         .unwrap_or_default()
 }
 
+/// The image this instance's host container is actually running: what
+/// `docker run` was given, the digest that tag resolved to, and the version
+/// label the image carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningImage {
+    pub image: String,
+    pub digest_ref: Option<String>,
+    pub version: Option<String>,
+}
+
+/// A value docker printed for a field the image does not have.
+fn docker_value(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || text == "<no value>" { None } else { Some(text.to_string()) }
+}
+
+/// What the host container is running right now, straight from the engine.
+///
+/// A machine that updates itself is on whatever image it last pulled, which
+/// is not necessarily the one `sv host up` started it with, so this asks the
+/// container rather than the local record. `None` when it is not running.
+pub fn running_host_image(docker: &dyn Docker, instance: &Instance) -> Option<RunningImage> {
+    if container_state(docker, instance).ok().flatten() != Some(true) {
+        return None;
+    }
+    let inspected = docker.run(&args(&["inspect", "--format", "{{.Config.Image}}", &instance.container()]), None).ok()?;
+    if !inspected.success {
+        return None;
+    }
+    let image = docker_value(&inspected.stdout)?;
+    let mut running = RunningImage { image: image.clone(), digest_ref: None, version: None };
+    let details = docker.run(
+        &args(&[
+            "image",
+            "inspect",
+            "--format",
+            "{{index .RepoDigests 0}}|{{index .Config.Labels \"org.opencontainers.image.version\"}}",
+            &image,
+        ]),
+        None,
+    );
+    if let Ok(details) = details
+        && details.success
+    {
+        let text = details.stdout.trim();
+        let (digest, version) = text.split_once('|').unwrap_or((text, ""));
+        running.digest_ref = docker_value(digest);
+        running.version = docker_value(version);
+    }
+    Some(running)
+}
+
+/// What `sv host status` says about the machine's own software: which host
+/// image it is on, and whether Svartal has a newer one it will take by
+/// itself. Pure, so every branch is a test rather than a container.
+pub fn host_software_sentences(
+    running: Option<&RunningImage>,
+    update: Option<&HostUpdate>,
+    host_release: Option<&HostRelease>,
+) -> Vec<String> {
+    let mut sentences = Vec::new();
+    match running {
+        Some(image) => {
+            let version = image.version.as_deref().unwrap_or("unknown version");
+            let reference = image.digest_ref.as_deref().unwrap_or(image.image.as_str());
+            sentences.push(format!("Host software {version} ({reference})."));
+        }
+        None => sentences.push("Host software: the container is not running.".to_string()),
+    }
+    // No update block at all is an older server, or a machine that is not a
+    // host: nothing truthful can be said about its updates, so nothing is.
+    let Some(update) = update else {
+        return sentences;
+    };
+    let current = host_release.and_then(|release| release.version.as_deref()).unwrap_or("unknown");
+    if let Some(reason) = update.blocked_reason.as_deref().map(str::trim).filter(|reason| !reason.is_empty()) {
+        sentences.push(reason.to_string());
+    } else if update.self_updating && update.up_to_date {
+        sentences.push(format!("The current host release is {current}; this machine is on it and updates itself."));
+    } else if update.self_updating && update.update_available {
+        sentences.push(format!("The current host release is {current}; this machine is behind and will take it at its next check."));
+    } else if !update.self_updating {
+        sentences.push("This machine has not asked Svartal for updates yet. Run `sv host up` to refresh its software.".to_string());
+    }
+    sentences
+}
+
 /// The sentence for one workspace state, while `up` waits.
 pub fn intent_sentence(intent: Option<&HostIntent>) -> String {
     match intent.map(|intent| intent.lifecycle_state.as_str()) {
@@ -727,6 +848,65 @@ mod tests {
         std::fs::write(home.join(".docker/config.json"), r#"{"auths":{}}"#).unwrap();
         assert_eq!(ghcr_auth_from_docker_config(&home, None), None);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    fn update(blocked: Option<&str>, self_updating: bool, up_to_date: bool, update_available: bool) -> HostUpdate {
+        HostUpdate {
+            version: Some("0.1.98".into()),
+            image_ref: None,
+            deployments_pulled_at: None,
+            up_to_date,
+            update_available,
+            self_updating,
+            blocked_reason: blocked.map(str::to_string),
+        }
+    }
+
+    fn release(version: &str) -> HostRelease {
+        HostRelease { image_ref: "ghcr.io/x/svartal-host:latest".into(), version: Some(version.into()), component: Some("host".into()) }
+    }
+
+    #[test]
+    fn the_host_software_lines_say_what_is_running_and_what_is_current() {
+        let running = RunningImage {
+            image: "ghcr.io/x/svartal-host:latest".into(),
+            digest_ref: Some("ghcr.io/x/svartal-host@sha256:abc".into()),
+            version: Some("0.1.98".into()),
+        };
+        let current = release("0.1.99");
+
+        // Up to date, and it keeps itself that way.
+        let lines = host_software_sentences(Some(&running), Some(&update(None, true, true, false)), Some(&current));
+        assert_eq!(lines[0], "Host software 0.1.98 (ghcr.io/x/svartal-host@sha256:abc).");
+        assert_eq!(lines[1], "The current host release is 0.1.99; this machine is on it and updates itself.");
+
+        // Behind, but it will take the new one on its own.
+        let lines = host_software_sentences(Some(&running), Some(&update(None, true, false, true)), Some(&current));
+        assert_eq!(lines[1], "The current host release is 0.1.99; this machine is behind and will take it at its next check.");
+
+        // Never asked: the person has to refresh it by hand.
+        let lines = host_software_sentences(Some(&running), Some(&update(None, false, false, true)), Some(&current));
+        assert_eq!(lines[1], "This machine has not asked Svartal for updates yet. Run `sv host up` to refresh its software.");
+
+        // The server's own sentence wins over every guess this could make.
+        let blocked = update(Some("This machine's host software predates self-update."), false, false, true);
+        let lines = host_software_sentences(Some(&running), Some(&blocked), Some(&current));
+        assert_eq!(lines[1], "This machine's host software predates self-update.");
+
+        // An older server says nothing about updates, so neither does this.
+        let lines = host_software_sentences(Some(&running), None, Some(&current));
+        assert_eq!(lines, vec!["Host software 0.1.98 (ghcr.io/x/svartal-host@sha256:abc).".to_string()]);
+    }
+
+    #[test]
+    fn an_unlabelled_image_and_a_stopped_container_still_have_a_line() {
+        let bare = RunningImage { image: "svartal-host:dev".into(), digest_ref: None, version: None };
+        let lines = host_software_sentences(Some(&bare), None, None);
+        assert_eq!(lines, vec!["Host software unknown version (svartal-host:dev).".to_string()]);
+
+        let lines = host_software_sentences(None, Some(&update(None, true, true, false)), None);
+        assert_eq!(lines[0], "Host software: the container is not running.");
+        assert_eq!(lines[1], "The current host release is unknown; this machine is on it and updates itself.");
     }
 
     #[test]

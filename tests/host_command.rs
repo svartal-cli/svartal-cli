@@ -33,6 +33,10 @@ struct FakeDocker {
     stdin: Mutex<Vec<String>>,
     env_files: Mutex<Vec<String>>,
     containers: Mutex<BTreeMap<String, bool>>,
+    /// What `docker inspect --format {{.Config.Image}}` answers, and what
+    /// `docker image inspect` answers about that image.
+    image: Mutex<String>,
+    image_details: Mutex<String>,
     engine_up: bool,
 }
 
@@ -43,8 +47,16 @@ impl FakeDocker {
             stdin: Mutex::new(Vec::new()),
             env_files: Mutex::new(Vec::new()),
             containers: Mutex::new(BTreeMap::new()),
+            image: Mutex::new("ghcr.io/svartal-cli/svartal-host:latest".to_string()),
+            image_details: Mutex::new("ghcr.io/svartal-cli/svartal-host@sha256:abcdef|0.1.99".to_string()),
             engine_up,
         }
+    }
+
+    /// The image the container is on, and what the engine knows about it.
+    fn running_image(&self, image: &str, details: &str) {
+        *self.image.lock().unwrap() = image.to_string();
+        *self.image_details.lock().unwrap() = details.to_string();
     }
 
     fn calls(&self) -> Vec<String> {
@@ -74,9 +86,15 @@ impl Docker for FakeDocker {
             // Every container is looked up by name, because two machines on
             // one computer are two containers.
             Some("inspect") => match args.last().and_then(|name| self.containers.lock().unwrap().get(name).copied()) {
+                Some(_) if args.iter().any(|argument| argument.contains(".Config.Image")) => {
+                    ok(&format!("{}\n", self.image.lock().unwrap()))
+                }
                 Some(running) => ok(if running { "true\n" } else { "false\n" }),
                 None => Ok(DockerOutput { success: false, stdout: String::new(), stderr: "No such object".into() }),
             },
+            Some("image") if args.get(1).map(String::as_str) == Some("inspect") => {
+                ok(&format!("{}\n", self.image_details.lock().unwrap()))
+            }
             Some("pull") => ok("Status: Downloaded"),
             Some("rm") => {
                 let name = args.last().cloned().unwrap_or_default();
@@ -153,6 +171,20 @@ fn transport(fixture: Value, states: Vec<&'static str>, with_release: bool) -> F
                     "machine": { "id": MACHINE_ID, "name": "laptop" },
                     "workspaceIntent": { "lifecycleState": state, "environmentId": environment, "lastError": error },
                     "release": release,
+                    "hostRelease": { "imageRef": "ghcr.io/svartal-cli/svartal-host:latest", "version": "0.1.99", "component": "host" },
+                    "hostUpdate": {
+                        "hostMode": true,
+                        "version": "0.1.99",
+                        "imageRef": "ghcr.io/svartal-cli/svartal-host:latest",
+                        "platform": "docker",
+                        "reportedAt": "2026-09-02T10:00:00Z",
+                        "deploymentsPulledAt": "2026-09-02T10:01:00Z",
+                        "latest": true,
+                        "upToDate": true,
+                        "updateAvailable": false,
+                        "selfUpdating": true,
+                        "blockedReason": null,
+                    },
                 }}),
             );
         }
@@ -372,6 +404,12 @@ fn status_and_down_read_the_record_and_purge_deletes_it() {
     let run_status = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| commands::host_status(context, out, docker, None));
     run_status.outcome.unwrap();
     assert!(run_status.output.contains("container svartal-host is running"), "{}", run_status.output);
+    assert!(run_status.output.contains("Host software 0.1.99 (ghcr.io/svartal-cli/svartal-host@sha256:abcdef)."), "{}", run_status.output);
+    assert!(
+        run_status.output.contains("The current host release is 0.1.99; this machine is on it and updates itself."),
+        "{}",
+        run_status.output
+    );
     assert!(run_status.output.contains("Your workspace is ready."), "{}", run_status.output);
     assert!(run_status.output.contains("environment-1234"), "{}", run_status.output);
 
@@ -595,4 +633,28 @@ fn down_with_an_instance_removes_only_that_machine() {
     }
     assert!(host::read_record(&dir.path().join("config"), &instance("m3b")).is_none());
     assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
+}
+
+#[test]
+fn the_running_host_image_is_read_from_the_container_not_the_record() {
+    let docker = FakeDocker::new(true);
+    let instance = host::Instance::default_instance();
+
+    // Nothing running: nothing to report.
+    assert!(host::running_host_image(&docker, &instance).is_none());
+
+    docker.already_running(host::CONTAINER_NAME);
+    docker.running_image("ghcr.io/svartal-cli/svartal-host:latest", "ghcr.io/svartal-cli/svartal-host@sha256:abcdef|0.1.99");
+    let running = host::running_host_image(&docker, &instance).expect("a running image");
+    assert_eq!(running.image, "ghcr.io/svartal-cli/svartal-host:latest");
+    assert_eq!(running.digest_ref.as_deref(), Some("ghcr.io/svartal-cli/svartal-host@sha256:abcdef"));
+    assert_eq!(running.version.as_deref(), Some("0.1.99"));
+
+    // A locally built image has neither a digest nor a version label.
+    docker.running_image("svartal-host:dev", "<no value>|<no value>");
+    let bare = host::running_host_image(&docker, &instance).expect("a running image");
+    assert_eq!(bare.image, "svartal-host:dev");
+    assert_eq!(bare.digest_ref, None);
+    assert_eq!(bare.version, None);
+    assert!(docker.calls().iter().any(|call| call.starts_with("image inspect ")), "{:?}", docker.calls());
 }
