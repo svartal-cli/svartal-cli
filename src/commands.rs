@@ -35,7 +35,7 @@ impl std::fmt::Display for CliError {
 impl std::error::Error for CliError {}
 
 impl CliError {
-    fn of(error: impl std::fmt::Display) -> Self {
+    pub(crate) fn of(error: impl std::fmt::Display) -> Self {
         Self(error.to_string())
     }
 }
@@ -71,7 +71,7 @@ impl<'a> Context<'a> {
 
     /// The stored session, refreshed if it is close to expiry. Fails rather
     /// than silently opening a browser.
-    fn current_session(&self) -> Result<Session, CliError> {
+    pub(crate) fn current_session(&self) -> Result<Session, CliError> {
         match self.client(0)?.existing_session().map_err(CliError::of)? {
             Some(session) => Ok(session),
             None => Err(CliError(NOT_SIGNED_IN.to_string())),
@@ -136,6 +136,21 @@ fn sign_in(context: &Context<'_>, out: &mut dyn Write) -> Result<Session, CliErr
 }
 
 pub fn logout(context: &Context<'_>, out: &mut dyn Write) -> Result<(), CliError> {
+    // The API token `sv issue` minted goes first: it authenticates on its own,
+    // so it is revoked with itself, before the session that minted it ends.
+    match api::revoke_api_token(context)? {
+        api::ApiTokenRevocation::Absent => {}
+        api::ApiTokenRevocation::Revoked => {
+            writeln!(out, "The Svartal API token was revoked.").ok();
+        }
+        api::ApiTokenRevocation::NotConfirmed(reason) => {
+            writeln!(
+                out,
+                "The Svartal API token was deleted here, but Svartal did not confirm revoking it ({reason}). It expires on its own; you can revoke it in the web app."
+            )
+            .ok();
+        }
+    }
     let removed = context.client(0)?.sign_out().map_err(CliError::of)?;
     writeln!(
         out,
@@ -1137,6 +1152,158 @@ pub fn host_down(
         writeln!(out, "The machine's identity and state volumes were deleted. Workspace containers and their volumes were left alone; remove them with docker if you want them gone.").ok();
     } else {
         writeln!(out, "The machine's identity and state were kept; `sv host up` resumes it. Workspace containers keep running.").ok();
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `sv issue`: conversations become Svartal issues, links and transcripts.
+
+/// The `postedVia` note for this computer: who typed, on which thread, here.
+fn provenance(agent: Option<&str>, thread: Option<&str>) -> serde_json::Value {
+    let hostname = crate::host::local_hostname();
+    crate::issue::posted_via(agent, thread, hostname.as_deref())
+}
+
+/// `sv issue post`.
+#[derive(Debug, Clone)]
+pub struct IssuePost<'a> {
+    pub project: &'a str,
+    /// The word after `--kind`, not yet mapped.
+    pub kind: &'a str,
+    pub title: &'a str,
+    /// Already read: the file, or stdin.
+    pub body: Option<&'a str>,
+    pub bundles: &'a [String],
+    pub agent: Option<&'a str>,
+    pub thread: Option<&'a str>,
+    pub json: bool,
+}
+
+/// `sv issue post --project <owner/slug> --kind <kind> --title <title>
+/// [--body-file <file>|-] [--bundle <bundle>]...`: create the issue, linked
+/// to the named bundles, and print `#<number> <url>`.
+pub fn issue_post(context: &Context<'_>, out: &mut dyn Write, post: &IssuePost<'_>) -> Result<(), CliError> {
+    let kind = crate::issue::work_item_kind(post.kind).map_err(CliError)?;
+    let title = post.title.trim();
+    if title.is_empty() {
+        return Err(CliError("`sv issue post` needs a title: `--title <title>`.".to_string()));
+    }
+    let item = crate::issue::create_work_item(
+        context,
+        &crate::issue::NewWorkItem {
+            project: post.project,
+            kind,
+            title,
+            description: post.body.map(str::trim_end).filter(|body| !body.is_empty()),
+            bundles: post.bundles,
+            posted_via: provenance(post.agent, post.thread),
+        },
+    )?;
+    let url = crate::issue::issue_url(&context.config.web_url, &item.project_id, item.number);
+    if post.json {
+        let value = serde_json::json!({
+            "id": item.id,
+            "number": item.number,
+            "projectId": item.project_id,
+            "kind": kind,
+            "bundles": post.bundles,
+            "url": url,
+        });
+        writeln!(out, "{value}").ok();
+        return Ok(());
+    }
+    writeln!(out, "#{} {url}", item.number).ok();
+    Ok(())
+}
+
+/// `sv issue link|unlink --project <owner/slug> #<number> <bundle>`: attach
+/// a bundle (by Svartal id or slug) to an issue, or detach it. The bundle
+/// itself is not touched; only Svartal's record of the pair changes.
+pub fn issue_link(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    project: &str,
+    number: &str,
+    bundle: &str,
+    unlink: bool,
+) -> Result<(), CliError> {
+    let number = crate::issue::parse_number(number).map_err(CliError)?;
+    let bundle = bundle.trim();
+    if bundle.is_empty() {
+        return Err(CliError("The bundle to link is missing: pass its Svartal id or slug.".to_string()));
+    }
+    let item = crate::issue::find_work_item(context, project, number)?;
+    if unlink {
+        crate::issue::unlink_bundle(context, &item.id, bundle)?;
+        writeln!(out, "Unlinked bundle {bundle} from #{number}.").ok();
+    } else {
+        crate::issue::link_bundle(context, &item.id, bundle)?;
+        writeln!(out, "Linked bundle {bundle} to #{number}.").ok();
+    }
+    Ok(())
+}
+
+/// `sv issue transcript`.
+#[derive(Debug, Clone)]
+pub struct IssueTranscript<'a> {
+    pub project: &'a str,
+    pub file: &'a std::path::Path,
+    /// `--work-item #12`, resolved to the item's id before posting.
+    pub work_item: Option<&'a str>,
+    pub bundles: &'a [String],
+    pub title: Option<&'a str>,
+    pub agent: Option<&'a str>,
+    pub thread: Option<&'a str>,
+    pub json: bool,
+}
+
+/// `sv issue transcript --project <owner/slug> --file <transcript.json>
+/// [--work-item #<number>] [--bundle <bundle>]... [--title <title>]`: save a
+/// conversation transcript on the project, attached to an issue and bundles
+/// when named, and print where it is.
+pub fn issue_transcript(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    transcript: &IssueTranscript<'_>,
+) -> Result<(), CliError> {
+    let document = crate::issue::read_transcript_file(transcript.file).map_err(CliError)?;
+    let work_item = match transcript.work_item {
+        None => None,
+        Some(number) => {
+            let number = crate::issue::parse_number(number).map_err(CliError)?;
+            Some(crate::issue::find_work_item(context, transcript.project, number)?)
+        }
+    };
+    let saved = crate::issue::create_transcript(
+        context,
+        &crate::issue::NewTranscript {
+            project: transcript.project,
+            document: &document,
+            title: transcript.title,
+            thread: transcript.thread,
+            work_item_id: work_item.as_ref().map(|item| item.id.as_str()),
+            bundles: transcript.bundles,
+            posted_via: provenance(transcript.agent, transcript.thread),
+        },
+    )?;
+    let url = crate::issue::transcript_url(&context.config.web_url, &saved.project_id, &saved.id);
+    if transcript.json {
+        let value = serde_json::json!({
+            "id": saved.id,
+            "projectId": saved.project_id,
+            "workItemId": work_item.as_ref().map(|item| item.id.clone()),
+            "bundles": transcript.bundles,
+            "duplicate": saved.duplicate,
+            "url": url,
+        });
+        writeln!(out, "{value}").ok();
+        return Ok(());
+    }
+    if saved.duplicate {
+        writeln!(out, "Svartal already had this transcript: {url}").ok();
+    } else {
+        writeln!(out, "Saved transcript {url}").ok();
     }
     Ok(())
 }
