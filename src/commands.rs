@@ -1110,6 +1110,12 @@ pub fn host_status(
         .ok();
         let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &record.machine_id)
             .map_err(CliError::of)?;
+        // The machine's own software, before its workspace: a host that is
+        // behind explains more than a workspace that is ready.
+        let running = host::running_host_image(docker, instance);
+        for sentence in host::host_software_sentences(running.as_ref(), status.host_update.as_ref(), status.host_release.as_ref()) {
+            writeln!(out, "{sentence}").ok();
+        }
         writeln!(out, "{}", host::intent_sentence(status.workspace_intent.as_ref())).ok();
         if let Some(environment_id) = status.workspace_intent.as_ref().and_then(|intent| intent.environment_id.as_deref()) {
             writeln!(out, "Workspace environment {environment_id}; `sv shell {}` opens it.", record.machine_name).ok();
