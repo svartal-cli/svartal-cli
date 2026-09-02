@@ -47,6 +47,13 @@ Commands:
   host status        Show the machine container and your workspace on it, for
                      every machine on this computer or one --instance of them.
   host down          Stop hosting; --purge also deletes the machine's state.
+  issue post         Post an issue, bug, chore, investigation, idea or plan to
+                     a Svartal project, as you, with a note naming the agent.
+  issue link #N <bundle>
+                     Link a bundle (Svartal id or slug) to issue #N;
+                     `issue unlink` detaches it. The bundle is not changed.
+  issue transcript   Save a conversation transcript (JSON) on a project, for
+                     audit, attached to an issue and bundles when named.
 
 A target is a short name, a workspace id, a workspace name, or a machine name.
 
@@ -76,6 +83,19 @@ Options:
                      (ssh-setup).
   --reset-hosts      Forget the workspace host key recorded for this host
                      first (ssh-setup).
+  --project <p>      The Svartal project, as owner/slug or id (issue).
+  --kind <kind>      issue, bug, chore, investigation, idea or plan (issue
+                     post).
+  --title <title>    The issue's title, or the transcript's (issue).
+  --body-file <f>    Read the issue body from a file, or from stdin with `-`
+                     (issue post).
+  --bundle <bundle>  A bundle to link, by Svartal id or slug; repeatable
+                     (issue post, issue transcript).
+  --file <path>      The transcript JSON to save (issue transcript).
+  --work-item #N     The issue a transcript belongs to (issue transcript).
+  --agent <name>     The agent that wrote the post, for the provenance note;
+                     defaults to $SV_AGENT (issue).
+  --thread <id>      The conversation thread the post came from (issue).
   -h, --help         Show this message.
   -V, --version      Show the version.
 ";
@@ -94,6 +114,12 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The value after a flag that takes one, or the sentence saying it is
+/// missing.
+fn flag_value(rest: &mut std::slice::Iter<'_, String>, missing: &str) -> Result<String, String> {
+    rest.next().cloned().ok_or_else(|| missing.to_string())
 }
 
 fn run(arguments: &[String]) -> Result<u8, String> {
@@ -129,6 +155,18 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
         "host" => &["--image", "--instance", "--name", "--purge"],
         "whoami" | "machines" | "envs" | "sessions" => &["--json"],
+        "issue" => &[
+            "--json",
+            "--project",
+            "--kind",
+            "--title",
+            "--body-file",
+            "--bundle",
+            "--file",
+            "--work-item",
+            "--agent",
+            "--thread",
+        ],
         _ => &[],
     };
     let mut json = false;
@@ -145,6 +183,15 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut host_name: Option<String> = None;
     let mut host_instance: Option<String> = None;
     let mut purge = false;
+    let mut project: Option<String> = None;
+    let mut kind: Option<String> = None;
+    let mut title: Option<String> = None;
+    let mut body_file: Option<String> = None;
+    let mut bundles: Vec<String> = Vec::new();
+    let mut transcript_file: Option<String> = None;
+    let mut work_item: Option<String> = None;
+    let mut agent: Option<String> = None;
+    let mut thread: Option<String> = None;
     let mut positional: Vec<&str> = Vec::new();
     // `sv` with nothing after it has no argument list to walk, not even an
     // empty one: the command itself is the missing element.
@@ -214,6 +261,17 @@ fn run(arguments: &[String]) -> Result<u8, String> {
                         .clone(),
                 );
             }
+            // The `sv issue` options all take a value, and each says what it
+            // is missing in its own words.
+            "--project" => project = Some(flag_value(&mut rest, "--project needs a project, as owner/slug or id.")?),
+            "--kind" => kind = Some(flag_value(&mut rest, "--kind needs one of: issue, bug, chore, investigation, idea, plan.")?),
+            "--title" => title = Some(flag_value(&mut rest, "--title needs a title.")?),
+            "--body-file" => body_file = Some(flag_value(&mut rest, "--body-file needs a path, or `-` for stdin.")?),
+            "--bundle" => bundles.push(flag_value(&mut rest, "--bundle needs a bundle id or slug.")?),
+            "--file" => transcript_file = Some(flag_value(&mut rest, "--file needs the path of the transcript JSON.")?),
+            "--work-item" => work_item = Some(flag_value(&mut rest, "--work-item needs an issue number, like #12.")?),
+            "--agent" => agent = Some(flag_value(&mut rest, "--agent needs the agent's name.")?),
+            "--thread" => thread = Some(flag_value(&mut rest, "--thread needs a thread id.")?),
             _ => {}
         }
     }
@@ -302,6 +360,89 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             commands::ssh_setup(&context, &mut stdout, &environment, target, print_block, reset_hosts)
         }
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
+        "issue" => {
+            let verb = positional.first().copied();
+            if verb.is_none() {
+                return Err("`sv issue` needs one of: post, link, unlink, transcript.".to_string());
+            }
+            let Some(project) = project.as_deref() else {
+                return Err("`sv issue` needs the project: `--project <owner/slug>`.".to_string());
+            };
+            // The agent's name is provenance, not authentication; an agent
+            // that sets SV_AGENT in its environment signs every post it makes.
+            let agent = agent
+                .or_else(|| environment.get("SV_AGENT").cloned())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            match verb {
+                Some("post") => {
+                    let Some(kind) = kind.as_deref() else {
+                        return Err(
+                            "`sv issue post` needs a kind: `--kind issue|bug|chore|investigation|idea|plan`."
+                                .to_string(),
+                        );
+                    };
+                    let Some(title) = title.as_deref() else {
+                        return Err("`sv issue post` needs a title: `--title <title>`.".to_string());
+                    };
+                    let body = match body_file.as_deref() {
+                        Some(path) => Some(svartal::issue::read_body_file(path)?),
+                        None => None,
+                    };
+                    commands::issue_post(
+                        &context,
+                        &mut stdout,
+                        &commands::IssuePost {
+                            project,
+                            kind,
+                            title,
+                            body: body.as_deref(),
+                            bundles: &bundles,
+                            agent: agent.as_deref(),
+                            thread: thread.as_deref(),
+                            json,
+                        },
+                    )
+                }
+                Some(verb @ ("link" | "unlink")) => {
+                    let (Some(number), Some(bundle)) = (positional.get(1).copied(), positional.get(2).copied())
+                    else {
+                        return Err(format!(
+                            "`sv issue {verb}` needs the issue and the bundle: `sv issue {verb} --project <owner/slug> #12 <bundle-id-or-slug>`."
+                        ));
+                    };
+                    commands::issue_link(&context, &mut stdout, project, number, bundle, verb == "unlink")
+                }
+                Some("transcript") => {
+                    let Some(file) = transcript_file.as_deref() else {
+                        return Err(
+                            "`sv issue transcript` needs the transcript to save: `--file <transcript.json>`."
+                                .to_string(),
+                        );
+                    };
+                    commands::issue_transcript(
+                        &context,
+                        &mut stdout,
+                        &commands::IssueTranscript {
+                            project,
+                            file: std::path::Path::new(file),
+                            work_item: work_item.as_deref(),
+                            bundles: &bundles,
+                            title: title.as_deref(),
+                            agent: agent.as_deref(),
+                            thread: thread.as_deref(),
+                            json,
+                        },
+                    )
+                }
+                Some(other) => {
+                    return Err(format!(
+                        "`sv issue {other}` is not a thing sv can do. It is `sv issue post`, `sv issue link`, `sv issue unlink` or `sv issue transcript`."
+                    ));
+                }
+                None => unreachable!("answered before the project check"),
+            }
+        }
         // This computer as a machine: one verb, three moments.
         "host" => {
             let docker = svartal::host::ProcessDocker;

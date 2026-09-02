@@ -51,6 +51,10 @@ impl Request {
         Self { method: "POST", url: url.into(), headers: Vec::new(), body: None }
     }
 
+    pub fn delete(url: impl Into<String>) -> Self {
+        Self { method: "DELETE", url: url.into(), headers: Vec::new(), body: None }
+    }
+
     pub fn header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_string(), value.to_string()));
         self
