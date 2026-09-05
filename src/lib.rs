@@ -23,6 +23,7 @@ pub mod host;
 pub mod http;
 pub mod issue;
 pub mod jwt;
+pub mod knit_config;
 pub mod link;
 pub mod loopback;
 pub mod oidc;
