@@ -16,6 +16,9 @@ pub const DEFAULT_ISSUER: &str = "https://api.svartal.com";
 pub const DEFAULT_AUDIENCE: &str = "svartal-relay";
 /// `DEFAULT_RELAY_URL`.
 pub const DEFAULT_RELAY_URL: &str = "https://relay.svartal.com";
+/// Where the Svartal web app lives. Only used to print links a person can
+/// open (`sv issue post` answers with the issue's page).
+pub const DEFAULT_WEB_URL: &str = "https://svartal.com";
 
 /// `ID-1`: the terminal is its own registered client, so a terminal grant can
 /// be revoked on its own; the web, desktop and mobile apps each have theirs.
@@ -62,6 +65,8 @@ pub struct Config {
     pub relay_url: String,
     /// Svartal API origin. Machines and workspaces live here.
     pub api_base_url: String,
+    /// Svartal web app origin, for the links `sv issue` prints.
+    pub web_url: String,
     /// Directory holding the token file and the DPoP key.
     pub state_directory: PathBuf,
 }
@@ -152,6 +157,13 @@ pub fn resolve_api_base_url(environment: &Environment) -> String {
         .unwrap_or_else(|| resolve_issuer(environment))
 }
 
+/// The web app is its own origin, so it cannot be derived from the issuer;
+/// `SVARTAL_WEB_URL` points a staging deployment's links at its own front end.
+pub fn resolve_web_url(environment: &Environment) -> String {
+    normalize_https_origin(&trimmed(environment, "SVARTAL_WEB_URL"))
+        .unwrap_or_else(|| DEFAULT_WEB_URL.to_string())
+}
+
 /// XDG first, then `~/.config/svartal`, so the credential sits next to every
 /// other CLI credential on the box and can be removed by deleting one
 /// directory. This is the same path the npm CLI uses — deliberately: a person
@@ -235,6 +247,7 @@ pub fn resolve_config(environment: &Environment) -> Result<Config, ConfigError> 
         redirects: resolve_loopback_redirects(environment)?,
         relay_url: resolve_relay_url(environment),
         api_base_url: resolve_api_base_url(environment),
+        web_url: resolve_web_url(environment),
         state_directory: resolve_state_directory(environment)?,
     })
 }

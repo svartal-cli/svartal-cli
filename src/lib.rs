@@ -21,6 +21,7 @@ pub mod dpop;
 pub mod fsutil;
 pub mod host;
 pub mod http;
+pub mod issue;
 pub mod jwt;
 pub mod link;
 pub mod loopback;

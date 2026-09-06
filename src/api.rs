@@ -5,31 +5,38 @@
 //! the CLI claims anything is reachable, so both are fetched.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
+use crate::commands::{CliError, Context};
 use crate::http::{HttpTransport, Request};
+use crate::store::{ApiTokenFile, StoredApiToken};
 
 #[derive(Debug)]
 pub enum ApiError {
     /// The request failed, or the answer was not the shape it should be.
     Failed { action: String, detail: String },
-    /// Svartal said no, and said why in words a person can act on. Its own
-    /// variant because that sentence *is* the message: "Could not name this
-    /// workspace." leaves somebody with a name to pick and no idea why.
-    Refused { message: String },
     /// `401`/`403`. Signing in again is the fix, so say so.
     Unauthorized { action: String },
+    /// Any other non-2xx answer, with whatever Svartal said about it. The
+    /// sentence carries the detail because for a write ("bundle not found",
+    /// "title is required") the detail is the whole point.
+    Refused { action: String, status: u16, detail: Option<String> },
 }
 
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Failed { action, .. } => write!(f, "Could not {action}."),
-            Self::Refused { message } => write!(f, "{message}"),
             Self::Unauthorized { action } => write!(
                 f,
                 "Svartal refused the request to {action}. Run `sv login` and try again."
             ),
+            Self::Refused { action, status, detail: Some(detail) } => {
+                write!(f, "Could not {action}: {detail} (HTTP {status}).")
+            }
+            Self::Refused { action, status, detail: None } => {
+                write!(f, "Could not {action}: Svartal returned HTTP {status}.")
+            }
         }
     }
 }
@@ -66,67 +73,8 @@ pub struct Machine {
     pub lifecycle_state: Option<String>,
     /// `"online"`, `"offline"`, or `"unknown"` when the box never checked in.
     pub presence: String,
-    /// Whether a server exists for this machine right now: `"running"`,
-    /// `"hibernated"`, `"waking"`, `"hibernating"`, `"failed"`. Absent from an
-    /// older Svartal, which is why it is optional and treated as running.
-    pub runtime_state: Option<String>,
     pub last_seen_at: Option<String>,
     pub environments: Vec<Workspace>,
-}
-
-/// What Svartal says about a machine somebody has asked for.
-///
-/// One shape for every outcome so the CLI prints one story: it is up, it is
-/// coming up, or somebody else has the last slot and you are in line.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MachineTicket {
-    /// `"active"`, `"waking"`, `"queued"`, `"asleep"`, `"failed"`, `"always_on"`.
-    pub state: String,
-    pub machine_id: Option<String>,
-    pub machine_name: Option<String>,
-    pub machine_short_name: Option<String>,
-    pub position: Option<u32>,
-    pub eta_seconds: Option<u64>,
-    pub reason: Option<String>,
-}
-
-impl MachineTicket {
-    /// Whether this machine is usable now.
-    pub fn ready(&self) -> bool {
-        matches!(self.state.as_str(), "active" | "always_on")
-    }
-
-    /// Whether waiting will get somewhere.
-    pub fn settling(&self) -> bool {
-        matches!(self.state.as_str(), "waking" | "queued")
-    }
-
-    /// What to print while waiting. Plain, and true for each state.
-    pub fn sentence(&self, label: &str) -> String {
-        match self.state.as_str() {
-            "active" | "always_on" => format!("{label} is ready."),
-            "waking" => match self.eta_seconds {
-                Some(seconds) if seconds >= 60 => {
-                    format!("Starting {label}. This takes about {} minutes.", seconds.div_ceil(60))
-                }
-                _ => format!("Starting {label}."),
-            },
-            "queued" => match self.position {
-                Some(position) if position > 1 => format!(
-                    "Every machine in the pool is in use. {} people are ahead of you.",
-                    position - 1
-                ),
-                _ => "Every machine in the pool is in use. You are next.".to_string(),
-            },
-            "asleep" => format!("{label} is asleep."),
-            "failed" => match self.reason.as_deref() {
-                Some(reason) => format!("{label} could not be started: {reason}"),
-                None => format!("{label} could not be started."),
-            },
-            other => format!("{label}: {other}"),
-        }
-    }
 }
 
 /// `RelayManagedEndpoint`. Modelled rather than passed through as raw JSON so
@@ -274,12 +222,13 @@ fn send_short_name(
         return Err(ApiError::Unauthorized { action: action.to_string() });
     }
     if !response.is_success() {
-        return Err(match refusal(&response) {
-            Some(message) => ApiError::Refused { message },
-            None => ApiError::Failed {
-                action: action.to_string(),
-                detail: format!("Svartal returned HTTP {}.", response.status),
-            },
+        // The field-level sentence first ("is already the name of another
+        // machine you own"), because for a name that sentence is the whole
+        // point; the generic detail otherwise.
+        return Err(ApiError::Refused {
+            action: action.to_string(),
+            status: response.status,
+            detail: refusal(&response).or_else(|| error_detail(&response.body)),
         });
     }
     Ok(())
@@ -308,76 +257,6 @@ fn refusal(response: &crate::http::Response) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Asks Svartal to make one machine usable, and says what happened.
-///
-/// Idempotent: asking twice while a machine is coming up does not start a
-/// second one, so it is safe to call before every connection.
-pub fn wake_machine(
-    http: &dyn HttpTransport,
-    api_base_url: &str,
-    access_token: &str,
-    machine_id: &str,
-) -> Result<MachineTicket, ApiError> {
-    let action = "start this machine";
-    send_ticket(
-        http,
-        Request::post(format!("{api_base_url}/api/v1/client/machines/{machine_id}/wake")),
-        access_token,
-        action,
-    )
-}
-
-/// What is happening with one machine, without asking for anything.
-///
-/// Polling must never wake a machine: somebody watching a list should not be
-/// paying for servers by looking at them.
-pub fn machine_activation(
-    http: &dyn HttpTransport,
-    api_base_url: &str,
-    access_token: &str,
-    machine_id: &str,
-) -> Result<MachineTicket, ApiError> {
-    let action = "read this machine's state";
-    send_ticket(
-        http,
-        Request::get(format!("{api_base_url}/api/v1/client/machines/{machine_id}/activation")),
-        access_token,
-        action,
-    )
-}
-
-fn send_ticket(
-    http: &dyn HttpTransport,
-    request: Request,
-    access_token: &str,
-    action: &str,
-) -> Result<MachineTicket, ApiError> {
-    let response = http
-        .send(
-            request
-                .header("authorization", &format!("Bearer {access_token}"))
-                .header("accept", "application/json"),
-        )
-        .map_err(|error| ApiError::Failed { action: action.to_string(), detail: error.to_string() })?;
-    if response.status == 401 || response.status == 403 {
-        return Err(ApiError::Unauthorized { action: action.to_string() });
-    }
-    if !response.is_success() {
-        return Err(ApiError::Failed {
-            action: action.to_string(),
-            detail: format!("Svartal returned HTTP {}.", response.status),
-        });
-    }
-    let body: Value = response
-        .json()
-        .map_err(|error| ApiError::Failed { action: action.to_string(), detail: error.to_string() })?;
-    let data = body.get("data").cloned().unwrap_or(Value::Null);
-    serde_json::from_value(data).map_err(|error| ApiError::Failed {
-        action: action.to_string(),
-        detail: error.to_string(),
-    })
-}
-
 /// The environments this identity is linked to on the relay.
 pub fn list_linked_environments(
     http: &dyn HttpTransport,
@@ -390,5 +269,200 @@ pub fn list_linked_environments(
     serde_json::from_value(environments).map_err(|error| ApiError::Failed {
         action: action.to_string(),
         detail: error.to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The Svartal API proper (`/api/v1/*`), reached with a minted API token.
+
+/// What the minted token may do: read and write projects, which covers
+/// issues, bundle links and transcripts. Nothing about machines or account.
+pub const API_TOKEN_SCOPES: [&str; 2] = ["project:read", "project:write"];
+/// Svartal's own default and its client-token maximum is a year; ninety days
+/// keeps a forgotten laptop's token from outliving its usefulness by much.
+pub const API_TOKEN_EXPIRES_IN_DAYS: u32 = 90;
+
+/// A successful answer: the status (a transcript post says 201 for new and
+/// 200 for one Svartal already had) and the decoded body, `Null` for an empty
+/// one such as a 204.
+#[derive(Debug, Clone)]
+pub struct ApiReply {
+    pub status: u16,
+    pub body: Value,
+}
+
+/// The `detail` sentence Svartal puts in its error bodies, when there is one:
+/// `{"errors": {"detail": "..."}}`, or a validation map `{"errors": {"title":
+/// ["can't be blank"]}}`, or a plain `{"error": "..."}`.
+fn error_detail(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    if let Some(detail) = value.pointer("/errors/detail").and_then(Value::as_str) {
+        return Some(detail.to_string());
+    }
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return Some(error.to_string());
+    }
+    let errors = value.get("errors")?.as_object()?;
+    let mut lines: Vec<String> = Vec::new();
+    for (field, messages) in errors {
+        match messages {
+            Value::Array(items) => {
+                for item in items.iter().filter_map(Value::as_str) {
+                    lines.push(format!("{field} {item}"));
+                }
+            }
+            Value::String(text) => lines.push(format!("{field} {text}")),
+            _ => {}
+        }
+    }
+    if lines.is_empty() { None } else { Some(lines.join("; ")) }
+}
+
+fn api_token_name() -> String {
+    match crate::host::local_hostname() {
+        Some(hostname) => format!("sv on {}", hostname.trim_end_matches(".local")),
+        None => "sv".to_string(),
+    }
+}
+
+/// `POST /api/v1/client/tokens` with the OIDC session: a fresh API token,
+/// written to the token file before it is returned so the next command finds
+/// it. The old file, if any, is replaced; Svartal keeps the old token alive
+/// until it expires, which is the price of not having its id any more only
+/// when the file was unreadable.
+pub fn mint_api_token(context: &Context<'_>) -> Result<StoredApiToken, CliError> {
+    let action = "mint a Svartal API token";
+    let session = context.current_session()?;
+    let response = context
+        .http
+        .send(
+            Request::post(format!("{}/api/v1/client/tokens", context.config.api_base_url))
+                .header("authorization", &format!("Bearer {}", session.access_token))
+                .header("accept", "application/json")
+                .json(json!({
+                    "name": api_token_name(),
+                    "scopes": API_TOKEN_SCOPES,
+                    "expiresInDays": API_TOKEN_EXPIRES_IN_DAYS,
+                })),
+        )
+        .map_err(|error| ApiError::Failed { action: action.to_string(), detail: error.to_string() })
+        .map_err(CliError::of)?;
+    if response.status == 401 || response.status == 403 {
+        return Err(CliError::of(ApiError::Unauthorized { action: action.to_string() }));
+    }
+    if !response.is_success() {
+        return Err(CliError::of(ApiError::Refused {
+            action: action.to_string(),
+            status: response.status,
+            detail: error_detail(&response.body),
+        }));
+    }
+    let body = response.json().map_err(CliError::of)?;
+    let data = body.get("data").cloned().unwrap_or(Value::Null);
+    let text = |field: &str| data.get(field).and_then(Value::as_str).map(str::to_string);
+    let (Some(id), Some(secret)) = (text("id"), text("secret")) else {
+        return Err(CliError(format!("Could not {action}: Svartal answered without a token.")));
+    };
+    let token = StoredApiToken { version: 1, id, secret, expires_at: text("expiresAt") };
+    ApiTokenFile::new(&context.config.state_directory).write(&token).map_err(CliError::of)?;
+    Ok(token)
+}
+
+/// The stored API token's secret, minted first when there is none or the one
+/// on disk is about to expire.
+pub fn ensure_api_token(context: &Context<'_>) -> Result<String, CliError> {
+    let file = ApiTokenFile::new(&context.config.state_directory);
+    if let Some(token) = file.read().map_err(CliError::of)?
+        && token.usable_at((context.now)())
+    {
+        return Ok(token.secret);
+    }
+    Ok(mint_api_token(context)?.secret)
+}
+
+/// One authenticated call under `{api_base_url}/api/v1`. `path` starts with
+/// `/`, `action` is the verb phrase an error sentence names ("post the
+/// issue"). A 401 — the token was revoked in the web app, or expired on a
+/// clock this program did not see — is answered by minting once and sending
+/// again; a second refusal is reported as one.
+pub fn api_request(
+    context: &Context<'_>,
+    method: &'static str,
+    path: &str,
+    body: Option<Value>,
+    action: &str,
+) -> Result<ApiReply, CliError> {
+    let url = format!("{}/api/v1{path}", context.config.api_base_url);
+    let mut secret = ensure_api_token(context)?;
+    let mut minted_again = false;
+    loop {
+        let mut request = Request { method, url: url.clone(), headers: Vec::new(), body: None }
+            .header("authorization", &format!("Bearer {secret}"))
+            .header("accept", "application/json");
+        if let Some(value) = body.clone() {
+            request = request.json(value);
+        }
+        let response = context
+            .http
+            .send(request)
+            .map_err(|error| ApiError::Failed { action: action.to_string(), detail: error.to_string() })
+            .map_err(CliError::of)?;
+        if response.status == 401 && !minted_again {
+            minted_again = true;
+            secret = mint_api_token(context)?.secret;
+            continue;
+        }
+        if response.status == 401 || response.status == 403 {
+            return Err(CliError::of(ApiError::Unauthorized { action: action.to_string() }));
+        }
+        if !response.is_success() {
+            return Err(CliError::of(ApiError::Refused {
+                action: action.to_string(),
+                status: response.status,
+                detail: error_detail(&response.body),
+            }));
+        }
+        let value = if response.body.iter().all(u8::is_ascii_whitespace) {
+            Value::Null
+        } else {
+            response.json().map_err(CliError::of)?
+        };
+        return Ok(ApiReply { status: response.status, body: value });
+    }
+}
+
+/// What `sv logout` did about the API token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiTokenRevocation {
+    /// There was no token file.
+    Absent,
+    /// Svartal revoked the token and the file is gone.
+    Revoked,
+    /// The file is gone, but Svartal did not confirm the revocation; the
+    /// token expires on its own.
+    NotConfirmed(String),
+}
+
+/// `DELETE /api/v1/tokens/:id`, authenticated with the token itself, then the
+/// file is removed whatever Svartal said: a person signing out wants the
+/// credential off this computer first, and a token Svartal would not revoke
+/// still expires.
+pub fn revoke_api_token(context: &Context<'_>) -> Result<ApiTokenRevocation, CliError> {
+    let file = ApiTokenFile::new(&context.config.state_directory);
+    let Some(token) = file.read().map_err(CliError::of)? else {
+        return Ok(ApiTokenRevocation::Absent);
+    };
+    let outcome = context.http.send(
+        Request::delete(format!("{}/api/v1/tokens/{}", context.config.api_base_url, token.id))
+            .header("authorization", &format!("Bearer {}", token.secret))
+            .header("accept", "application/json"),
+    );
+    file.remove().map_err(CliError::of)?;
+    Ok(match outcome {
+        Ok(response) if response.is_success() => ApiTokenRevocation::Revoked,
+        // Already revoked or gone on Svartal's side: nothing left to revoke.
+        Ok(response) if response.status == 404 || response.status == 401 => ApiTokenRevocation::Revoked,
+        Ok(response) => ApiTokenRevocation::NotConfirmed(format!("Svartal returned HTTP {}", response.status)),
+        Err(error) => ApiTokenRevocation::NotConfirmed(error.to_string()),
     })
 }
