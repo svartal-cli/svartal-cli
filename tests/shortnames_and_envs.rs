@@ -8,6 +8,7 @@
 mod common;
 
 use std::os::unix::fs::PermissionsExt as _;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
@@ -283,14 +284,90 @@ const ENVIRONMENTS_BODY: &str = r#"{
   ]
 }"#;
 
+/// The commands under test now write names to Svartal, so the harness has to
+/// answer that write and remember it: a name assigned in one call is what the
+/// next listing reads back, which is the whole point of moving it off disk.
+/// The write half of the fake Svartal: apply the PATCH the way the server
+/// would, so the next listing tells the truth.
+fn record_short_name(
+    machines: &Arc<Mutex<Value>>,
+    url: &str,
+    short_name: Value,
+) -> svartal::http::Response {
+    // The one refusal worth exercising end to end: Svartal, not the CLI,
+    // deciding a name cannot be had. The sentence has to survive the trip.
+    if short_name == json!("taken") {
+        return json_response(
+            422,
+            &json!({ "errors": { "short_name": ["is already the name of another machine you own"] } }),
+        );
+    }
+
+    let segments: Vec<&str> = url.split('/').collect();
+    let mut machines = machines.lock().unwrap();
+    let rows = machines["data"].as_array_mut().expect("machines");
+
+    // .../machines/<id>/environments/<environmentId>/short-name
+    if let Some(position) = segments.iter().position(|segment| *segment == "environments") {
+        let environment_id = segments[position + 1];
+        for machine in rows.iter_mut() {
+            for workspace in machine["environments"].as_array_mut().expect("environments") {
+                if workspace["environmentId"] == json!(environment_id) {
+                    workspace["shortName"] = short_name;
+                    return json_response(200, &json!({ "data": workspace }));
+                }
+            }
+        }
+        return json_response(404, &json!({ "errors": { "detail": "Not found" } }));
+    }
+
+    // .../machines/<id>/short-name
+    let machine_id = segments[segments.len() - 2];
+    for machine in rows.iter_mut() {
+        if machine["id"] == json!(machine_id) {
+            machine["shortName"] = short_name;
+            return json_response(200, &json!({ "data": machine }));
+        }
+    }
+    json_response(404, &json!({ "errors": { "detail": "Not found" } }))
+}
+
 struct Harness {
     fixture: Value,
     directory: TempDir,
+    machines: Arc<Mutex<Value>>,
 }
 
 impl Harness {
     fn new(tag: &str) -> Self {
-        Self { fixture: fixture("oidc.json"), directory: TempDir::new(tag) }
+        Self {
+            fixture: fixture("oidc.json"),
+            directory: TempDir::new(tag),
+            machines: Arc::new(Mutex::new(serde_json::from_str(MACHINES_BODY).unwrap())),
+        }
+    }
+
+    /// The short name Svartal now holds for one workspace.
+    fn recorded_workspace_name(&self, environment_id: &str) -> Option<String> {
+        let machines = self.machines.lock().unwrap();
+        for machine in machines["data"].as_array()? {
+            for workspace in machine["environments"].as_array()? {
+                if workspace["environmentId"] == json!(environment_id) {
+                    return workspace["shortName"].as_str().map(str::to_string);
+                }
+            }
+        }
+        None
+    }
+
+    fn recorded_machine_name(&self, machine_id: &str) -> Option<String> {
+        let machines = self.machines.lock().unwrap();
+        machines["data"]
+            .as_array()?
+            .iter()
+            .find(|machine| machine["id"] == json!(machine_id))?["shortName"]
+            .as_str()
+            .map(str::to_string)
     }
 
     fn run(
@@ -300,6 +377,7 @@ impl Harness {
         let fixture = self.fixture.clone();
         let issuer = fixture["issuer"].as_str().unwrap().to_string();
         let relay = fixture["relayUrl"].as_str().unwrap().to_string();
+        let machines = Arc::clone(&self.machines);
         let http = FakeTransport::new(move |request| {
             let url = request.url.as_str();
             if url == format!("{issuer}/.well-known/openid-configuration") {
@@ -309,10 +387,17 @@ impl Harness {
                 return json_response(200, &fixture["jwks"]);
             }
             if url == format!("{issuer}/api/v1/client/machines") {
-                return json_response(200, &serde_json::from_str(MACHINES_BODY).unwrap());
+                return json_response(200, &machines.lock().unwrap().clone());
             }
             if url == format!("{relay}/v1/environments") {
                 return json_response(200, &serde_json::from_str(ENVIRONMENTS_BODY).unwrap());
+            }
+            if request.method == "PATCH" && url.ends_with("/short-name") {
+                let short_name = match &request.body {
+                    Some(svartal::http::Body::Json(body)) => body["short_name"].clone(),
+                    _ => Value::Null,
+                };
+                return record_short_name(&machines, url, short_name);
             }
             json_response(404, &json!({ "error": "unexpected" }))
         });
@@ -353,35 +438,105 @@ impl Harness {
 fn name_records_a_workspace_found_by_any_of_the_usual_words() {
     let harness = Harness::new("name");
     let (outcome, output) =
-        harness.run(|context, out| commands::name(context, out, "web", "Primary"));
+        harness.run(|context, out| commands::name(context, out, "web", "Primary", false));
     outcome.unwrap();
     assert_eq!(output.trim(), "web is Primary (env-primary).");
+    // Svartal holds it, not this computer: that is what makes the same word
+    // read the same way in the web app and on another laptop.
+    assert_eq!(harness.recorded_workspace_name("env-primary").as_deref(), Some("web"));
+    // Mirrored locally so shell completion still works with no network, but
+    // Svartal is the record.
     assert_eq!(harness.names().environment_of("web"), Some("env-primary"));
 
     // Naming it again through the name it already has is a no-op, not an error.
-    let (outcome, _) = harness.run(|context, out| commands::name(context, out, "web", "web"));
+    let (outcome, _) = harness.run(|context, out| commands::name(context, out, "web", "web", false));
     outcome.unwrap();
+    assert_eq!(harness.recorded_workspace_name("env-primary").as_deref(), Some("web"));
+}
+
+#[test]
+fn a_machine_takes_a_name_of_its_own() {
+    let harness = Harness::new("machine-name");
+    let (outcome, output) =
+        harness.run(|context, out| commands::name(context, out, "box", "workbench", true));
+    outcome.unwrap();
+    assert_eq!(output.trim(), "box is the machine workbench.");
+    assert_eq!(harness.recorded_machine_name("machine-1").as_deref(), Some("box"));
+
+    // Renaming says what it displaced, so the old word is not silently gone.
+    let (outcome, output) =
+        harness.run(|context, out| commands::name(context, out, "desk", "box", true));
+    outcome.unwrap();
+    assert!(output.contains("It used to be box."));
+    assert_eq!(harness.recorded_machine_name("machine-1").as_deref(), Some("desk"));
+
+    let (outcome, _) =
+        harness.run(|context, out| commands::name(context, out, "web", "nowhere", true));
+    assert!(outcome.unwrap_err().to_string().contains("No machine called nowhere"));
+}
+
+#[test]
+fn a_machine_reads_by_its_short_name_with_the_hostname_kept_beside_it() {
+    let harness = Harness::new("machine-cell");
+    harness.run(|context, out| commands::name(context, out, "box", "workbench", true)).0.unwrap();
+
+    let (outcome, output) = harness.run(|context, out| commands::machines(context, out, false));
+    outcome.unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert!(lines[0].starts_with("MACHINE"));
+    // Both things, the chosen word first. Nothing a person already recognised
+    // disappears when somebody names the box.
+    assert!(lines[1].starts_with("box (workbench)"), "{}", lines[1]);
+    // The heartbeat column no longer shares its header with the machine column.
+    assert!(lines[0].contains("HEARTBEAT"));
+    assert_eq!(lines[0].matches("MACHINE").count(), 1);
+}
+
+#[test]
+fn a_name_svartal_holds_beats_one_this_computer_remembers() {
+    let harness = Harness::new("precedence");
+    // A name from before Svartal held them, pointing at the second workspace.
+    let mut local = Shortnames::new();
+    local.assign("web", "env-second").unwrap();
+    write_shortnames(harness.directory.path(), &local).unwrap();
+
+    let (outcome, output) =
+        harness.run(|context, out| commands::name(context, out, "web", "Primary", false));
+    outcome.unwrap();
+    assert!(output.contains("web used to mean env-second."));
+
+    let (outcome, output) = harness.run(|context, out| commands::envs(context, out, true));
+    outcome.unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    let rows = parsed["environments"].as_array().unwrap();
+    assert_eq!(rows[0]["environmentId"], json!("env-primary"));
+    assert_eq!(rows[0]["shortname"], json!("web"));
+    // The word now means the workspace Svartal says it means, in the cache too.
+    assert_eq!(rows[1]["shortname"], Value::Null);
     assert_eq!(harness.names().environment_of("web"), Some("env-primary"));
 }
 
 #[test]
 fn name_refuses_a_word_that_is_not_a_name_or_that_could_never_be_used() {
     let harness = Harness::new("refuse");
-    let (outcome, _) = harness.run(|context, out| commands::name(context, out, "Web Box", "Primary"));
+    let (outcome, _) =
+        harness.run(|context, out| commands::name(context, out, "Web Box", "Primary", false));
     assert!(outcome.unwrap_err().to_string().contains("is not a usable name"));
 
     // A workspace id always wins resolution, so a name shaped like one would
-    // sit in the file doing nothing.
+    // be recorded and then never used.
     let (outcome, _) =
-        harness.run(|context, out| commands::name(context, out, "env-second", "Primary"));
+        harness.run(|context, out| commands::name(context, out, "env-second", "Primary", false));
     assert!(outcome.unwrap_err().to_string().contains("already a workspace id"));
 
-    let (outcome, _) = harness.run(|context, out| commands::name(context, out, "web", "nowhere"));
+    let (outcome, _) =
+        harness.run(|context, out| commands::name(context, out, "web", "nowhere", false));
     let message = outcome.unwrap_err().to_string();
     assert!(message.contains("No workspace called nowhere"));
     assert!(message.contains("SHORTNAME"), "the listing is offered with the refusal");
 
     assert!(harness.names().is_empty());
+    assert_eq!(harness.recorded_workspace_name("env-primary"), None);
 }
 
 #[test]
@@ -389,28 +544,69 @@ fn name_lists_what_is_stored_and_remove_forgets_one() {
     let harness = Harness::new("list");
     let (outcome, output) = harness.run(commands::list_names);
     outcome.unwrap();
-    assert!(output.contains("No workspace names yet"));
+    assert!(output.contains("No names yet"));
 
-    harness.run(|context, out| commands::name(context, out, "web", "Primary")).0.unwrap();
+    harness.run(|context, out| commands::name(context, out, "web", "Primary", false)).0.unwrap();
+    harness.run(|context, out| commands::name(context, out, "box", "workbench", true)).0.unwrap();
     let (outcome, output) = harness.run(commands::list_names);
     outcome.unwrap();
     let lines: Vec<&str> = output.lines().collect();
     assert!(lines[0].starts_with("SHORTNAME"));
-    assert!(lines[1].contains("web") && lines[1].contains("env-primary"));
+    assert!(output.contains("box") && output.contains("machine") && output.contains("workbench"));
+    assert!(output.contains("web") && output.contains("env-primary"));
 
     let (outcome, output) = harness.run(|context, out| commands::remove_name(context, out, "web"));
     outcome.unwrap();
     assert_eq!(output.trim(), "web is no longer a name for env-primary.");
-    assert!(harness.names().is_empty());
+    assert_eq!(harness.recorded_workspace_name("env-primary"), None);
+    assert_eq!(harness.names().environment_of("web"), None);
+
+    let (outcome, output) = harness.run(|context, out| commands::remove_name(context, out, "box"));
+    outcome.unwrap();
+    assert_eq!(output.trim(), "box is no longer a name for the machine workbench.");
+    assert_eq!(harness.recorded_machine_name("machine-1"), None);
 
     let (outcome, _) = harness.run(|context, out| commands::remove_name(context, out, "web"));
-    assert!(outcome.unwrap_err().to_string().contains("There is no workspace named web"));
+    assert!(outcome.unwrap_err().to_string().contains("There is nothing named web"));
+}
+
+#[test]
+fn a_refusal_from_svartal_is_repeated_in_the_words_svartal_used() {
+    let harness = Harness::new("refusal-passthrough");
+    let (outcome, _) =
+        harness.run(|context, out| commands::name(context, out, "taken", "Primary", false));
+
+    // Not "Svartal returned HTTP 422": a name is refused for reasons a person
+    // can act on, and the sentence saying which is the point.
+    let message = outcome.unwrap_err().to_string();
+    assert!(message.contains("That name is already the name of another machine you own."), "{message}");
+    // Nothing recorded anywhere, including the local cache.
+    assert_eq!(harness.recorded_workspace_name("env-primary"), None);
+    assert!(harness.names().is_empty());
+}
+
+#[test]
+fn a_name_left_on_this_computer_is_listed_apart_and_can_still_be_forgotten() {
+    let harness = Harness::new("local-leftover");
+    let mut local = Shortnames::new();
+    local.assign("old", "env-second").unwrap();
+    write_shortnames(harness.directory.path(), &local).unwrap();
+
+    let (outcome, output) = harness.run(commands::list_names);
+    outcome.unwrap();
+    assert!(output.contains("visible to nobody else"));
+    assert!(output.contains("old") && output.contains("env-second"));
+
+    let (outcome, output) = harness.run(|context, out| commands::remove_name(context, out, "old"));
+    outcome.unwrap();
+    assert_eq!(output.trim(), "old is no longer a name for env-second.");
+    assert!(harness.names().is_empty());
 }
 
 #[test]
 fn envs_prints_the_short_name_column_and_the_same_note_machines_prints() {
     let harness = Harness::new("envs");
-    harness.run(|context, out| commands::name(context, out, "web", "Primary")).0.unwrap();
+    harness.run(|context, out| commands::name(context, out, "web", "Primary", false)).0.unwrap();
 
     let (outcome, output) = harness.run(|context, out| commands::envs(context, out, false));
     outcome.unwrap();
@@ -432,11 +628,14 @@ fn envs_prints_the_short_name_column_and_the_same_note_machines_prints() {
 #[test]
 fn a_shell_target_can_be_a_short_name() {
     let harness = Harness::new("shell-target");
-    harness.run(|context, out| commands::name(context, out, "web", "Primary")).0.unwrap();
-    // The step `sv shell web` takes before it touches the network: the stored
-    // file, read from disk, resolving that word to a workspace.
+    // The cache resolves on its own, which is what makes `sv shell web` work
+    // before the listing has been fetched.
+    let mut local = Shortnames::new();
+    local.assign("web", "env-primary").unwrap();
+    write_shortnames(harness.directory.path(), &local).unwrap();
     let names = shortnames::read_shortnames(harness.directory.path()).unwrap();
     let target = svartal::target::select_target(&view(), &names, Some("web")).unwrap();
     assert_eq!(target.environment_id, "env-primary");
     assert_eq!(target.label, "Primary");
+    drop(harness);
 }

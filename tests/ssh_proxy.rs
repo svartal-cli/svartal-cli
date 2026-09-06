@@ -337,9 +337,11 @@ fn the_connect_chain_is_the_reference_chain() {
             .as_str()
             .expect("label")
             .to_string(),
+        short_name: None,
         machine_name: recorded["target"]["machineName"]
             .as_str()
             .map(str::to_string),
+        machine_short_name: None,
         linked: true,
         machine_presence: Some("unknown".to_string()),
         machine_id: None,
@@ -1657,7 +1659,9 @@ fn connect_with_endpoint(http_base: &str, ws_base: &str) -> String {
             .expect("environment")
             .to_string(),
         label: "Primary".to_string(),
+        short_name: None,
         machine_name: None,
+        machine_short_name: None,
         linked: true,
         machine_presence: Some("unknown".to_string()),
         machine_id: None,

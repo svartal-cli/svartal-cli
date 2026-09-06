@@ -239,36 +239,87 @@ pub fn envs(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Result<()
     Ok(())
 }
 
-/// `sv name` — the assignments, without asking the network for anything.
+/// `sv name` — every name in force, and what it points at.
+///
+/// Svartal holds the names now, so this asks for them: a name given on another
+/// computer is still this workspace's name. Names left in the local file from
+/// before that are listed under their own heading, because they are visible to
+/// nobody else and are the ones worth moving.
 pub fn list_names(context: &Context<'_>, out: &mut dyn Write) -> Result<(), CliError> {
     let stored =
         shortnames::read_shortnames(&context.config.state_directory).map_err(CliError::of)?;
-    if stored.is_empty() {
-        writeln!(out, "No workspace names yet. Name one with `sv name <name> <workspace>`.").ok();
+    let view = load_view(context)?;
+
+    let mut assigned: Vec<Vec<String>> = Vec::new();
+    let mut seen_machines: Vec<&str> = Vec::new();
+    for row in &view.rows {
+        if let Some(short_name) = &row.machine_short_name
+            && !seen_machines.contains(&row.machine_id.as_str())
+        {
+            seen_machines.push(row.machine_id.as_str());
+            assigned.push(vec![
+                short_name.clone(),
+                "machine".to_string(),
+                row.machine_name.clone(),
+            ]);
+        }
+        if let Some(short_name) = &row.short_name {
+            assigned.push(vec![
+                short_name.clone(),
+                "workspace".to_string(),
+                row.environment_id.clone(),
+            ]);
+        }
+    }
+
+    // A local entry whose workspace already answers to a name in Svartal is
+    // shadowed, not lost: resolution reaches the server's answer first.
+    let local: Vec<Vec<String>> = stored
+        .entries()
+        .filter(|(_, environment_id)| {
+            !view
+                .rows
+                .iter()
+                .any(|row| row.environment_id == *environment_id && row.short_name.is_some())
+        })
+        .map(|(name, environment_id)| vec![name.to_string(), environment_id.to_string()])
+        .collect();
+
+    if assigned.is_empty() && local.is_empty() {
+        writeln!(out, "No names yet. Name something with `sv name <name> <workspace>`.").ok();
         return Ok(());
     }
-    let table = view::render_table(
-        &["SHORTNAME", "WORKSPACE ID"],
-        &stored
-            .entries()
-            .map(|(name, environment_id)| vec![name.to_string(), environment_id.to_string()])
-            .collect::<Vec<_>>(),
-    );
-    writeln!(out, "{table}").ok();
+
+    if !assigned.is_empty() {
+        writeln!(out, "{}", view::render_table(&["SHORTNAME", "KIND", "IS"], &assigned)).ok();
+    }
+    if !local.is_empty() {
+        if !assigned.is_empty() {
+            writeln!(out).ok();
+        }
+        writeln!(out, "Named on this computer only, and visible to nobody else:").ok();
+        writeln!(out, "{}", view::render_table(&["SHORTNAME", "WORKSPACE ID"], &local)).ok();
+    }
     Ok(())
 }
 
-/// `sv name <shortname> <workspace>`.
+/// `sv name <shortname> <workspace>`, and `sv name --machine <shortname> <machine>`.
 ///
-/// The workspace is resolved by the ordinary rules, so the thing being named
-/// can itself be a machine name, a label, a workspace id, or an older short
-/// name. A workspace that is not linked can still be named: naming is a note to
-/// yourself, not a connection.
+/// The name is recorded in Svartal, not on this computer: a machine's owner
+/// assigns the word, and everyone who can see the workspace reads the same
+/// one. That is also why a name given here shows up in the web app and in the
+/// desktop app, which a file in `~/.config/svartal` never did.
+///
+/// The thing being named is resolved by the ordinary rules, so it can itself
+/// be a machine name, a label, a workspace id, or an older short name. A
+/// workspace that is not linked can still be named: naming is a record, not a
+/// connection.
 pub fn name(
     context: &Context<'_>,
     out: &mut dyn Write,
     shortname: &str,
     target: &str,
+    machine: bool,
 ) -> Result<(), CliError> {
     let shortname = shortname.trim().to_lowercase();
     if !shortnames::is_valid_shortname(&shortname) {
@@ -277,12 +328,12 @@ pub fn name(
             shortnames::SHORTNAME_RULE
         )));
     }
-    let view = load_view(context)?;
+    let (session, view) = load_session_and_view(context)?;
     let mut stored =
         shortnames::read_shortnames(&context.config.state_directory).map_err(CliError::of)?;
 
     // A name that is already a workspace id could never be resolved: ids win.
-    // Storing it would leave a name that silently does nothing.
+    // Recording it would leave a name that silently does nothing.
     if crate::target::shell_targets(&view)
         .iter()
         .any(|candidate| candidate.environment_id.to_lowercase() == shortname)
@@ -290,6 +341,23 @@ pub fn name(
         return Err(CliError(format!(
             "{shortname} is already a workspace id, so a name like that would never be used. Pick another word."
         )));
+    }
+
+    if machine {
+        let resolved = resolve_machine(&view, target)?;
+        api::set_machine_short_name(
+            context.http,
+            &context.config.api_base_url,
+            &session.access_token,
+            &resolved.id,
+            Some(&shortname),
+        )
+        .map_err(CliError::of)?;
+        writeln!(out, "{shortname} is the machine {}.", resolved.name).ok();
+        if let Some(previous) = resolved.short_name.filter(|previous| *previous != shortname) {
+            writeln!(out, "It used to be {previous}.").ok();
+        }
+        return Ok(());
     }
 
     let resolved = match crate::target::resolve_shell_target(&view, &stored, target) {
@@ -308,38 +376,143 @@ pub fn name(
         }
     };
 
-    let assignment =
-        stored.assign(&shortname, &resolved.environment_id).map_err(CliError::of)?;
+    // A workspace Svartal does not list is one this CLI reached through a relay
+    // link alone. There is no machine to record the name against, and pretending
+    // otherwise would store a name nobody else could ever see.
+    let machine_id = resolved.machine_id.clone().ok_or_else(|| {
+        CliError(format!(
+            "{} is linked but is not on a machine Svartal lists, so there is nowhere to record a name for it.",
+            resolved.environment_id
+        ))
+    })?;
+
+    api::set_workspace_short_name(
+        context.http,
+        &context.config.api_base_url,
+        &session.access_token,
+        &machine_id,
+        &resolved.environment_id,
+        Some(&shortname),
+    )
+    .map_err(CliError::of)?;
+
+    writeln!(out, "{shortname} is {} ({}).", resolved.label, resolved.environment_id).ok();
+
+    // Mirrored into the local file, which is now a cache rather than the
+    // record: shell completion reads it offline (see `completions/`), and it
+    // would rot if the only copy of a name lived behind a network call.
+    // Resolution reaches Svartal's answer first either way, so a stale entry
+    // costs a completion, never a wrong workspace.
+    let displaced = stored.assign(&shortname, &resolved.environment_id).map_err(CliError::of)?;
     shortnames::write_shortnames(&context.config.state_directory, &stored)
         .map_err(CliError::of)?;
 
-    writeln!(out, "{shortname} is {} ({}).", resolved.label, resolved.environment_id).ok();
-    if let Some(previous) = assignment.replaced_shortname {
+    if let Some(previous) = resolved.short_name.filter(|previous| *previous != shortname) {
         writeln!(out, "It used to be {previous}.").ok();
     }
-    if let Some(previous) = assignment.replaced_environment {
+    if let Some(previous) = displaced.replaced_environment {
         writeln!(out, "{shortname} used to mean {previous}.").ok();
     }
     Ok(())
 }
 
-/// `sv name --remove <shortname>`. Offline: the workspace is untouched.
+/// `sv name --remove <shortname>`.
+///
+/// Clears the name wherever it is held: in Svartal for everybody, or in this
+/// computer's file for a name given before Svartal held them. The workspace and
+/// the machine are untouched either way.
 pub fn remove_name(
     context: &Context<'_>,
     out: &mut dyn Write,
     shortname: &str,
 ) -> Result<(), CliError> {
     let shortname = shortname.trim().to_lowercase();
+    let (session, view) = load_session_and_view(context)?;
+
+    if let Some(row) =
+        view.rows.iter().find(|row| row.short_name.as_deref() == Some(shortname.as_str()))
+    {
+        api::set_workspace_short_name(
+            context.http,
+            &context.config.api_base_url,
+            &session.access_token,
+            &row.machine_id,
+            &row.environment_id,
+            None,
+        )
+        .map_err(CliError::of)?;
+        let mut stored =
+            shortnames::read_shortnames(&context.config.state_directory).map_err(CliError::of)?;
+        if stored.remove(&shortname).is_some() {
+            shortnames::write_shortnames(&context.config.state_directory, &stored)
+                .map_err(CliError::of)?;
+        }
+        writeln!(out, "{shortname} is no longer a name for {}.", row.environment_id).ok();
+        return Ok(());
+    }
+
+    if let Some(row) =
+        view.rows.iter().find(|row| row.machine_short_name.as_deref() == Some(shortname.as_str()))
+    {
+        api::set_machine_short_name(
+            context.http,
+            &context.config.api_base_url,
+            &session.access_token,
+            &row.machine_id,
+            None,
+        )
+        .map_err(CliError::of)?;
+        writeln!(out, "{shortname} is no longer a name for the machine {}.", row.machine_name).ok();
+        return Ok(());
+    }
+
     let mut stored =
         shortnames::read_shortnames(&context.config.state_directory).map_err(CliError::of)?;
     match stored.remove(&shortname) {
-        None => Err(CliError(format!("There is no workspace named {shortname}."))),
+        None => Err(CliError(format!("There is nothing named {shortname}."))),
         Some(environment_id) => {
             shortnames::write_shortnames(&context.config.state_directory, &stored)
                 .map_err(CliError::of)?;
             writeln!(out, "{shortname} is no longer a name for {environment_id}.").ok();
             Ok(())
         }
+    }
+}
+
+/// One machine, from whatever the person typed for it.
+struct MachineTarget {
+    id: String,
+    name: String,
+    short_name: Option<String>,
+}
+
+fn resolve_machine(view: &view::MachinesView, argument: &str) -> Result<MachineTarget, CliError> {
+    let needle = argument.trim().to_lowercase();
+    let mut matches: Vec<MachineTarget> = Vec::new();
+    for row in &view.rows {
+        if matches.iter().any(|found| found.id == row.machine_id) {
+            continue;
+        }
+        let answers = row.machine_id.to_lowercase() == needle
+            || row.machine_name.to_lowercase() == needle
+            || row.machine_short_name.as_deref().map(str::to_lowercase).as_deref()
+                == Some(needle.as_str());
+        if answers {
+            matches.push(MachineTarget {
+                id: row.machine_id.clone(),
+                name: row.machine_name.clone(),
+                short_name: row.machine_short_name.clone(),
+            });
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().expect("one machine")),
+        0 => Err(CliError(format!(
+            "No machine called {argument}. Run `sv machines` to see them."
+        ))),
+        _ => Err(CliError(format!(
+            "{argument} names more than one machine. Use the machine id instead."
+        ))),
     }
 }
 
@@ -404,7 +577,13 @@ fn ensure_machine_running(
     let Some(machine_id) = target.machine_id.as_deref() else {
         return Ok(());
     };
-    let label = target.machine_name.clone().unwrap_or_else(|| target.label.clone());
+    // Named the way every other surface names it, so "Starting box." is the
+    // same box the machines page calls box.
+    let label = target
+        .machine_short_name
+        .clone()
+        .or_else(|| target.machine_name.clone())
+        .unwrap_or_else(|| target.label.clone());
 
     let mut ticket = crate::api::wake_machine(
         context.http,
@@ -1072,10 +1251,18 @@ pub fn host_up(
     host::write_record(
         &state,
         &instance,
-        &host::HostRecord { machine_id: registration.machine.id.clone(), machine_name: name.clone(), image: image.clone() },
+        &host::HostRecord {
+            machine_id: registration.machine.id.clone(),
+            machine_name: name.clone(),
+            machine_short_name: registration.machine.short_name.clone(),
+            image: image.clone(),
+        },
     )
     .map_err(CliError)?;
-    writeln!(out, "Machine {name} is running (container {}).", instance.container()).ok();
+    // Named by whatever its owner calls it, which is the word every other
+    // Svartal surface shows for this box.
+    let reads_as = registration.machine.short_name.clone().unwrap_or_else(|| name.clone());
+    writeln!(out, "Machine {reads_as} is running (container {}).", instance.container()).ok();
 
     let mut last = String::new();
     for _ in 0..HOST_WAIT_ATTEMPTS {
@@ -1153,11 +1340,18 @@ pub fn host_status(
             Some(false) => "stopped",
             None => "missing",
         };
+        // `box (workbench, <id>)` when its owner named it, and the plain
+        // `workbench (<id>)` when nobody has.
+        let (reads_as, identifiers) = match &record.machine_short_name {
+            Some(short_name) if *short_name != record.machine_name => (
+                short_name.clone(),
+                format!("{}, {}", record.machine_name, record.machine_id),
+            ),
+            _ => (record.machine_name.clone(), record.machine_id.clone()),
+        };
         writeln!(
             out,
-            "Machine {} ({}){}: container {} is {container}.",
-            record.machine_name,
-            record.machine_id,
+            "Machine {reads_as} ({identifiers}){}: container {} is {container}.",
             instance_phrase(instance),
             instance.container()
         )
@@ -1166,7 +1360,7 @@ pub fn host_status(
             .map_err(CliError::of)?;
         writeln!(out, "{}", host::intent_sentence(status.workspace_intent.as_ref())).ok();
         if let Some(environment_id) = status.workspace_intent.as_ref().and_then(|intent| intent.environment_id.as_deref()) {
-            writeln!(out, "Workspace environment {environment_id}; `sv shell {}` opens it.", record.machine_name).ok();
+            writeln!(out, "Workspace environment {environment_id}; `sv shell {reads_as}` opens it.").ok();
         }
     }
     Ok(())

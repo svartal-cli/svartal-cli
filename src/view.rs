@@ -15,12 +15,17 @@ use crate::api::{LinkRecord, Machine};
 pub struct WorkspaceRow {
     pub machine_id: String,
     pub machine_name: String,
+    /// The word the machine's owner gave it in Svartal, when there is one.
+    pub machine_short_name: Option<String>,
     pub machine_presence: String,
     /// Whether a server exists for the machine right now. None from an older
     /// Svartal that does not report it.
     pub machine_runtime_state: Option<String>,
     pub environment_id: String,
     pub label: String,
+    /// The word the machine's owner gave this workspace in Svartal. `label` is
+    /// generated, so this is the only one of the two anybody chose.
+    pub short_name: Option<String>,
     pub kind: String,
     pub lifecycle_state: String,
     /// True when this identity holds a relay link to the workspace.
@@ -40,7 +45,18 @@ pub struct MachinesView {
 
 /// Said once, everywhere the CLI would otherwise imply it knows more than it
 /// does.
-pub const MACHINE_STATE_NOTE: &str = "REACHABLE is your relay link, not a live check. MACHINE is the box's last heartbeat: unknown means it has never reported.";
+pub const MACHINE_STATE_NOTE: &str = "REACHABLE is your relay link, not a live check. HEARTBEAT is the box's last heartbeat: unknown means it has never reported.";
+
+/// A machine as one cell: the word its owner chose, with the name the host
+/// derived from its own hostname kept in brackets so nothing a person already
+/// recognised disappears.
+pub fn machine_cell(name: &str, short_name: Option<&str>) -> String {
+    match short_name.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(short) if short != name => format!("{short} ({name})"),
+        Some(short) => short.to_string(),
+        None => name.to_string(),
+    }
+}
 
 pub const SESSIONS_NOT_EXPOSED_NOTE: &str = "Live agent sessions are not readable with a terminal sign-in yet. They live on the workspace itself and need a connected session, which this CLI cannot open yet. See NOTES.md in the svartal-cli package.";
 
@@ -63,10 +79,12 @@ pub fn build_machines_view(machines: &[Machine], links: &[LinkRecord]) -> Machin
             rows.push(WorkspaceRow {
                 machine_id: machine.id.clone(),
                 machine_name: machine.name.clone(),
+                machine_short_name: machine.short_name.clone(),
                 machine_presence: present(Some(machine.presence.as_str()), "unknown"),
                 machine_runtime_state: machine.runtime_state.clone(),
                 environment_id: workspace.environment_id.clone(),
                 label: present(workspace.label.as_deref(), &workspace.environment_id),
+                short_name: workspace.short_name.clone(),
                 kind: present(workspace.kind.as_deref(), "-"),
                 lifecycle_state: present(workspace.lifecycle_state.as_deref(), "-"),
                 linked: link.is_some(),
@@ -126,14 +144,14 @@ pub fn format_machines_view(view: &MachinesView) -> String {
     let mut sections: Vec<String> = Vec::new();
     if !view.rows.is_empty() {
         sections.push(render_table(
-            &["MACHINE", "WORKSPACE", "WORKSPACE ID", "KIND", "STATE", "REACHABLE", "MACHINE"],
+            &["MACHINE", "WORKSPACE", "WORKSPACE ID", "KIND", "STATE", "REACHABLE", "HEARTBEAT"],
             &view
                 .rows
                 .iter()
                 .map(|row| {
                     vec![
-                        row.machine_name.clone(),
-                        row.label.clone(),
+                        machine_cell(&row.machine_name, row.machine_short_name.as_deref()),
+                        row.short_name.clone().unwrap_or_else(|| row.label.clone()),
                         row.environment_id.clone(),
                         row.kind.clone(),
                         row.lifecycle_state.clone(),
@@ -191,10 +209,16 @@ pub fn build_env_rows(
         .rows
         .iter()
         .map(|row| EnvRow {
-            shortname: shortnames.shortname_of(&row.environment_id).map(str::to_string),
+            // Svartal's answer first: it is what everyone else reading this
+            // workspace sees. A local name is a leftover from before names
+            // were stored, and still resolves.
+            shortname: row
+                .short_name
+                .clone()
+                .or_else(|| shortnames.shortname_of(&row.environment_id).map(str::to_string)),
             label: row.label.clone(),
             environment_id: row.environment_id.clone(),
-            machine_name: Some(row.machine_name.clone()),
+            machine_name: Some(machine_cell(&row.machine_name, row.machine_short_name.as_deref())),
             kind: row.kind.clone(),
             lifecycle_state: row.lifecycle_state.clone(),
             linked: row.linked,
@@ -226,7 +250,7 @@ pub fn format_envs_view(rows: &[EnvRow]) -> String {
         return NO_ENVIRONMENTS.to_string();
     }
     render_table(
-        &["SHORTNAME", "WORKSPACE", "WORKSPACE ID", "MACHINE", "KIND", "STATE", "REACHABLE", "MACHINE"],
+        &["SHORTNAME", "WORKSPACE", "WORKSPACE ID", "MACHINE", "KIND", "STATE", "REACHABLE", "HEARTBEAT"],
         &rows
             .iter()
             .map(|row| {
@@ -260,8 +284,8 @@ pub fn format_sessions_view(view: &MachinesView) -> String {
             .iter()
             .map(|row| {
                 vec![
-                    row.machine_name.clone(),
-                    row.label.clone(),
+                    machine_cell(&row.machine_name, row.machine_short_name.as_deref()),
+                    row.short_name.clone().unwrap_or_else(|| row.label.clone()),
                     row.environment_id.clone(),
                     row.linked_at.clone().unwrap_or_else(|| "-".to_string()),
                 ]
@@ -323,8 +347,12 @@ pub fn filter_view_by_machine(view: &MachinesView, machine: &str) -> MachinesVie
             .iter()
             .filter(|row| {
                 row.machine_name.to_lowercase() == needle
+                    || row.machine_short_name.as_deref().map(str::to_lowercase).as_deref()
+                        == Some(needle.as_str())
                     || row.machine_id.to_lowercase() == needle
                     || row.environment_id.to_lowercase() == needle
+                    || row.short_name.as_deref().map(str::to_lowercase).as_deref()
+                        == Some(needle.as_str())
             })
             .cloned()
             .collect(),

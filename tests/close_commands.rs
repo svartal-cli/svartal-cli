@@ -239,17 +239,36 @@ fn no_connection(_socket_url: &str) -> Result<ScriptedWs, String> {
     panic!("this close should have been refused before connecting");
 }
 
+/// The same machine, with the name its owner gave the primary workspace in
+/// Svartal. Names live there now, so a listing is where a short name arrives
+/// from rather than a file this test would have to write first.
+const NAMED_MACHINES_BODY: &str = r#"{
+  "data": [
+    {
+      "id": "machine-1",
+      "name": "workbench",
+      "origin": "donated",
+      "lifecycleState": "open",
+      "presence": "online",
+      "lastSeenAt": "2026-08-13T09:00:00Z",
+      "environments": [
+        { "id": "row-1", "environmentId": "env-primary", "label": "Primary", "shortName": "web", "kind": "personal", "lifecycleState": "active" },
+        { "id": "row-2", "environmentId": "env-second", "label": "Second", "kind": "workspace", "lifecycleState": "active" }
+      ]
+    }
+  ]
+}"#;
+
 #[test]
 fn close_shell_takes_a_short_name_and_says_it_closed_the_shell() {
     let harness = Harness::new("close-shortname");
-    harness.run(MACHINES_BODY, |context, out| commands::name(context, out, "web", "Primary")).0.unwrap();
 
     let thread_id = format!("svartal-shell:{}", harness.subject());
     let sent: Rc<RefCell<Vec<Value>>> = Rc::default();
     let recorded = sent.clone();
     let incoming =
         VecDeque::from(vec![snapshot_chunk(&[(&thread_id, "shell-env-primary")]), close_exit()]);
-    let (outcome, output, http) = harness.run(MACHINES_BODY, |context, out| {
+    let (outcome, output, http) = harness.run(NAMED_MACHINES_BODY, |context, out| {
         commands::close_with(context, out, TerminalKind::Shell, Some("web"), None, move |_url| {
             Ok(ScriptedWs { incoming, sent: recorded })
         })

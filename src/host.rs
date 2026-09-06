@@ -297,6 +297,9 @@ pub struct HostIntent {
 pub struct HostMachine {
     pub id: String,
     pub name: String,
+    /// The word this machine's owner gave it in Svartal, when there is one.
+    #[serde(default)]
+    pub short_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -397,6 +400,11 @@ pub fn host_status(
 pub struct HostRecord {
     pub machine_id: String,
     pub machine_name: String,
+    /// Remembered so `sv host status` can name the machine the way everything
+    /// else does before it has asked Svartal anything. Absent from a record
+    /// written before names were held, which reads as "nobody named it".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_short_name: Option<String>,
     pub image: String,
 }
 

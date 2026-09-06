@@ -286,7 +286,7 @@ fn a_second_up_reuses_the_machine_and_replaces_the_container() {
     host::write_record(
         &dir.path().join("config"),
         &host::Instance::default_instance(),
-        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), image: "ghcr.io/x/svartal-host:test".into() },
+        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), machine_short_name: None, image: "ghcr.io/x/svartal-host:test".into() },
     )
     .unwrap();
     let docker = FakeDocker::new(true);
@@ -365,7 +365,7 @@ fn status_and_down_read_the_record_and_purge_deletes_it() {
     host::write_record(
         &dir.path().join("config"),
         &host::Instance::default_instance(),
-        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), image: "img".into() },
+        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), machine_short_name: None, image: "img".into() },
     )
     .unwrap();
     docker.already_running(host::CONTAINER_NAME);
@@ -451,7 +451,7 @@ fn record(dir: &TempDir, instance: &host::Instance, machine_name: &str) {
     host::write_record(
         &dir.path().join("config"),
         instance,
-        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: machine_name.into(), image: "img".into() },
+        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: machine_name.into(), machine_short_name: None, image: "img".into() },
     )
     .unwrap();
 }
