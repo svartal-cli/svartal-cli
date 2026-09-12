@@ -29,6 +29,11 @@ pub struct ShellTarget {
     pub linked: bool,
     /// The machine's own heartbeat: `online`, `offline`, or `unknown`.
     pub machine_presence: Option<String>,
+    /// What Svartal intends this workspace to be, when it said so. It is what
+    /// turns "you are not linked" into "the link is coming back"; see
+    /// `select_shell_target`. None for a workspace known only from a link
+    /// record, which is linked anyway.
+    pub intent_state: Option<String>,
     /// A personal workspace belonging to somebody else. It stays a candidate
     /// for its own workspace id and for nothing else: an id is unambiguous and
     /// a person who typed one meant it, while a machine name means "my
@@ -43,6 +48,9 @@ pub enum TargetError {
     /// No target was given and more than one workspace could have been meant.
     Unspecified { reachable: String },
     NotLinked { label: String },
+    /// Not linked, but Svartal is putting the link back. The person has
+    /// something to do about that, so this says what.
+    Relinking { label: String, machine_name: Option<String> },
     MachineOffline { label: String },
 }
 
@@ -73,6 +81,14 @@ impl std::fmt::Display for TargetError {
                 f,
                 "You are not linked to {label}, so there is nothing to connect to. Link the machine from the Svartal web app first."
             ),
+            Self::Relinking { label, machine_name: Some(machine_name) } => write!(
+                f,
+                "Svartal is relinking {label}, so the link is not back yet. Run `sv host up` on {machine_name} to finish it. Then `sv shell` will work."
+            ),
+            Self::Relinking { label, machine_name: None } => write!(
+                f,
+                "Svartal is relinking {label}, so the link is not back yet. Run `sv host up` on that machine to finish it. Then `sv shell` will work."
+            ),
             Self::MachineOffline { label } => write!(
                 f,
                 "The machine hosting {label} last reported that it is offline, so a shell would not reach it. Start the machine and try again."
@@ -90,6 +106,7 @@ fn target_of_row(row: &WorkspaceRow) -> ShellTarget {
         machine_name: Some(row.machine_name.clone()),
         linked: row.linked,
         machine_presence: Some(row.machine_presence.clone()),
+        intent_state: row.intent_state.clone(),
         belongs_to_another: row.belongs_to_another,
     }
 }
@@ -104,6 +121,9 @@ pub fn shell_targets(view: &MachinesView) -> Vec<ShellTarget> {
             machine_name: None,
             linked: true,
             machine_presence: None,
+            // A link record carries no intent, and a linked workspace needs
+            // none: nothing below asks about it.
+            intent_state: None,
             // A link this identity holds is its own proof of whose it is.
             belongs_to_another: false,
         });
@@ -249,6 +269,11 @@ pub fn select_target(
 /// A machine whose heartbeat says `offline` is refused; `unknown` is not. Most
 /// machines never report at all, so treating silence as "offline" would refuse
 /// almost every real connection.
+///
+/// A workspace Svartal is relinking is refused too, but with its own sentence:
+/// the link is not gone, it is coming back, and there is one command to run on
+/// the machine to finish it. Telling that person to link the machine in the web
+/// app would send them somewhere that cannot help them.
 pub fn select_shell_target(
     view: &MachinesView,
     shortnames: &Shortnames,
@@ -274,6 +299,12 @@ pub fn select_shell_target(
         Resolution::Resolved(target) => target,
     };
     if !target.linked {
+        if target.intent_state.as_deref().map(str::trim) == Some("relinking") {
+            return Err(TargetError::Relinking {
+                label: target.label,
+                machine_name: target.machine_name,
+            });
+        }
         return Err(TargetError::NotLinked { label: target.label });
     }
     if target.machine_presence.as_deref() == Some("offline") {
@@ -299,6 +330,7 @@ mod tests {
             kind: Some("personal".to_string()),
             lifecycle_state: Some("active".to_string()),
             owner: owner.map(str::to_string),
+            intent_state: None,
         };
         let machines = vec![Machine {
             id: "machine-1".to_string(),
@@ -376,6 +408,60 @@ mod tests {
         // question any more.
         let target = select_target(&view, &Shortnames::new(), None).unwrap();
         assert_eq!(target.environment_id, "env-mine");
+    }
+
+    /// The person's own workspace, unlinked, with Svartal putting the link
+    /// back. This is the machine whose link was revoked.
+    fn relinking_workspace() -> MachinesView {
+        let machines = vec![Machine {
+            id: "machine-1".to_string(),
+            name: "m3".to_string(),
+            origin: Some("donated".to_string()),
+            lifecycle_state: Some("open".to_string()),
+            presence: "online".to_string(),
+            last_seen_at: None,
+            environments: vec![Workspace {
+                id: "row-mine".to_string(),
+                environment_id: "env-mine".to_string(),
+                label: Some("Marc".to_string()),
+                kind: Some("personal".to_string()),
+                lifecycle_state: Some("active".to_string()),
+                owner: Some("marc".to_string()),
+                intent_state: Some("relinking".to_string()),
+            }],
+        }];
+        build_machines_view(&machines, &[], Some("marc"))
+    }
+
+    #[test]
+    fn a_workspace_being_relinked_is_refused_with_the_command_that_finishes_it() {
+        let view = relinking_workspace();
+        // It is still this person's own workspace, so it resolves the way it
+        // always did; what changes is the sentence it is refused with.
+        let Resolution::Resolved(target) = resolve(&view, "m3") else {
+            panic!("m3 did not resolve");
+        };
+        assert_eq!(target.intent_state.as_deref(), Some("relinking"));
+
+        let error = select_shell_target(&view, &Shortnames::new(), "m3").unwrap_err();
+        let TargetError::Relinking { label, machine_name } = &error else {
+            panic!("expected a relinking refusal, got {error:?}");
+        };
+        assert_eq!(label, "Marc");
+        assert_eq!(machine_name.as_deref(), Some("m3"));
+        let said = error.to_string();
+        assert!(said.contains("`sv host up`"), "{said}");
+        assert!(said.contains("m3"), "{said}");
+    }
+
+    #[test]
+    fn every_other_unlinked_workspace_is_refused_the_way_it_always_was() {
+        // No intent at all, which is what an older server sends: the old
+        // sentence, unchanged.
+        let view = two_personal_workspaces(Some("someone"));
+        let error = select_shell_target(&view, &Shortnames::new(), "m3").unwrap_err();
+        assert!(matches!(error, TargetError::NotLinked { .. }), "{error:?}");
+        assert!(error.to_string().contains("Link the machine from the Svartal web app"));
     }
 
     #[test]

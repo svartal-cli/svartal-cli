@@ -54,6 +54,24 @@ fn owned_workspace(environment_id: &str, kind: &str, owner: Value) -> Value {
     })
 }
 
+/// The same, with the intent Svartal now sends alongside the owner.
+fn owned_workspace_with_intent(
+    environment_id: &str,
+    kind: &str,
+    owner: Value,
+    intent_state: Value,
+) -> Value {
+    json!({
+        "id": format!("row-{environment_id}"),
+        "environmentId": environment_id,
+        "label": environment_id,
+        "kind": kind,
+        "lifecycleState": "active",
+        "owner": owner,
+        "intentState": intent_state,
+    })
+}
+
 fn link(environment_id: &str, label: &str) -> LinkRecord {
     serde_json::from_value(json!({
         "environmentId": environment_id,
@@ -131,6 +149,25 @@ fn the_table_pads_every_column_and_leaves_no_trailing_spaces() {
 }
 
 #[test]
+fn the_machines_table_uses_the_same_words_for_reachable_as_every_other_listing() {
+    let machines = vec![machine(json!([
+        owned_workspace_with_intent(
+            "env-relinking",
+            "personal",
+            json!("person"),
+            json!("relinking"),
+        ),
+        owned_workspace_with_intent("env-unclaimed", "personal", Value::Null, json!("unclaimed")),
+        // An older server, unchanged.
+        owned_workspace("env-quiet", "personal", json!("person")),
+    ]))];
+    let table = format_machines_view(&build_machines_view(&machines, &[], Some("person")), true);
+    assert!(table.lines().any(|line| line.contains("env-relinking") && line.contains("relinking")));
+    assert!(table.lines().any(|line| line.contains("env-unclaimed") && line.contains("unclaimed")));
+    assert!(table.lines().any(|line| line.contains("env-quiet") && line.contains("not linked")));
+}
+
+#[test]
 fn the_notes_never_claim_a_live_check() {
     assert!(MACHINE_STATE_NOTE.contains("not a live check"));
     let machines = vec![machine(json!([workspace("env-primary", json!("Primary"), json!("personal"))]))];
@@ -198,6 +235,35 @@ fn all_shows_the_other_rows_and_only_then_names_their_owner() {
         lines[3].split_whitespace().collect::<Vec<_>>(),
         vec!["workbench", "env-shared", "env-shared", "workspace", "-", "active", "not", "linked", "unknown"]
     );
+}
+
+#[test]
+fn machines_and_envs_agree_that_an_unclaimed_workspace_is_not_yours() {
+    // A personal workspace nobody owns and nobody is linked to is a leftover.
+    // `sv machines` drops it exactly as `sv envs` does; `--all` keeps it.
+    let view = build_machines_view(
+        &[machine(json!([
+            owned_workspace("env-mine", "personal", json!("person")),
+            { "id": "row-x", "environmentId": "env-unclaimed", "label": "Nobody's", "kind": "personal", "lifecycleState": "active", "intentState": "unclaimed" },
+        ]))],
+        &[],
+        Some("person"),
+    );
+    assert_eq!(
+        view.yours().rows.iter().map(|row| row.environment_id.as_str()).collect::<Vec<_>>(),
+        vec!["env-mine"]
+    );
+    assert!(format_machines_view(&view, true).contains("env-unclaimed"));
+    // An unclaimed workspace this identity is somehow still linked to is
+    // reachable, and reachable rows are never dropped.
+    let linked = build_machines_view(
+        &[machine(json!([
+            { "id": "row-x", "environmentId": "env-unclaimed", "label": "Nobody's", "kind": "personal", "lifecycleState": "active", "intentState": "unclaimed" },
+        ]))],
+        &[link("env-unclaimed", "Nobody's")],
+        Some("person"),
+    );
+    assert_eq!(linked.yours().rows.len(), 1);
 }
 
 #[test]
