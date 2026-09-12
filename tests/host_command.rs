@@ -108,6 +108,18 @@ impl Docker for FakeDocker {
     }
 }
 
+/// One answer the control plane gives a poll: the lifecycle state, and after
+/// a `/` whether Svartal also said the workspace is linked to the caller.
+/// A bare `"ready"` is a Svartal old enough never to say, which is the
+/// compatibility case.
+fn poll_answer(answer: &str) -> (&str, Option<bool>) {
+    match answer.split_once('/') {
+        Some((state, "linked")) => (state, Some(true)),
+        Some((state, "unlinked")) => (state, Some(false)),
+        _ => (answer, None),
+    }
+}
+
 /// The control plane: identity endpoints from the fixture, plus the two
 /// host-machine routes. `states` is what successive GETs answer.
 fn transport(fixture: Value, states: Vec<&'static str>, with_release: bool) -> FakeTransport {
@@ -140,21 +152,25 @@ fn transport(fixture: Value, states: Vec<&'static str>, with_release: bool) -> F
         }
         if url.ends_with(&format!("/api/v1/client/host-machines/{MACHINE_ID}")) {
             let mut seen = polls.lock().unwrap();
-            let state = states.get(*seen).copied().unwrap_or_else(|| states.last().copied().unwrap_or("ready"));
+            let answer = states.get(*seen).copied().unwrap_or_else(|| states.last().copied().unwrap_or("ready"));
             *seen += 1;
+            let (state, linked) = poll_answer(answer);
             let (environment, error) = match state {
                 "ready" => (json!("environment-1234"), json!({})),
                 "failed" => (Value::Null, json!({ "code": "host_capacity_disk" })),
                 _ => (Value::Null, json!({})),
             };
-            return json_response(
-                200,
-                &json!({ "data": {
-                    "machine": { "id": MACHINE_ID, "name": "laptop" },
-                    "workspaceIntent": { "lifecycleState": state, "environmentId": environment, "lastError": error },
-                    "release": release,
-                }}),
-            );
+            let mut data = json!({
+                "machine": { "id": MACHINE_ID, "name": "laptop" },
+                "workspaceIntent": { "lifecycleState": state, "environmentId": environment, "lastError": error },
+                "release": release,
+            });
+            // An older Svartal has no `linked` key at all, so the tests that
+            // do not ask for one get that server.
+            if let Some(linked) = linked {
+                data["linked"] = json!(linked);
+            }
+            return json_response(200, &json!({ "data": data }));
         }
         json_response(404, &json!({ "error": "unexpected" }))
     })
@@ -335,6 +351,88 @@ fn a_failed_workspace_names_the_cause_and_the_log() {
     assert!(error.contains("host_capacity_disk"), "{error}");
     assert!(error.contains("host_serving"), "the log was not shown: {error}");
     assert!(error.contains("sv host up"), "{error}");
+}
+
+/// Success means the person can see the machine they just started. A
+/// workspace Svartal reports as ready but not linked to the account that
+/// asked is the laptop case: `up` used to say "ready" while the same
+/// account's `sv machines` said `not linked`.
+#[test]
+fn up_waits_for_the_workspace_to_become_visible_to_your_account() {
+    let dir = TempDir::new("host-up-unlinked");
+    let docker = FakeDocker::new(true);
+    let run = run(true, &docker, vec!["ready/unlinked", "ready/linked"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), None)
+    });
+    run.outcome.unwrap();
+    assert_eq!(
+        run.output.matches("Your workspace is running but not visible to your account yet").count(),
+        1,
+        "{}",
+        run.output
+    );
+    assert!(run.output.contains("Your workspace is ready."), "{}", run.output);
+    assert!(run.output.contains("sv envs"), "{}", run.output);
+    // It kept polling, which is what asks Svartal to repair the link.
+    assert_eq!(run.urls.iter().filter(|url| url.ends_with(MACHINE_ID)).count(), 2, "{:?}", run.urls);
+}
+
+/// A Svartal that never says whether the workspace is linked is the one this
+/// release replaces; `up` must not wait on an answer it will never get.
+#[test]
+fn a_server_that_says_nothing_about_linking_still_finishes_at_ready() {
+    let dir = TempDir::new("host-up-no-linked-key");
+    let docker = FakeDocker::new(true);
+    let run = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), None)
+    });
+    run.outcome.unwrap();
+    assert!(run.output.contains("Your workspace is ready."), "{}", run.output);
+    assert!(!run.output.contains("not visible to your account"), "{}", run.output);
+    assert_eq!(run.urls.iter().filter(|url| url.ends_with(MACHINE_ID)).count(), 1, "{:?}", run.urls);
+}
+
+/// `relinking` is Svartal repairing the link: a state to wait through, said
+/// in words, not a failure.
+#[test]
+fn relinking_is_a_state_up_waits_through() {
+    let dir = TempDir::new("host-up-relinking");
+    let docker = FakeDocker::new(true);
+    let run = run(true, &docker, vec!["relinking/unlinked", "ready/linked"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), None)
+    });
+    run.outcome.unwrap();
+    assert!(run.output.contains("Linking your workspace to your account"), "{}", run.output);
+    assert!(run.output.contains("Your workspace is ready."), "{}", run.output);
+}
+
+/// `sv host status` answers the question the owner actually asks — can I see
+/// this machine — and says nothing when Svartal did not say.
+#[test]
+fn status_says_whether_the_workspace_is_visible_to_your_account() {
+    let dir = TempDir::new("host-status-linked");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    let docker = FakeDocker::new(true);
+    docker.already_running(host::CONTAINER_NAME);
+
+    let visible = run(true, &docker, vec!["ready/linked"], true, dir.path(), |context, out, docker| {
+        commands::host_status(context, out, docker, None)
+    });
+    visible.outcome.unwrap();
+    assert!(visible.output.contains("Visible to your account in Ivaldi."), "{}", visible.output);
+
+    let unseen = run(true, &docker, vec!["ready/unlinked"], true, dir.path(), |context, out, docker| {
+        commands::host_status(context, out, docker, None)
+    });
+    unseen.outcome.unwrap();
+    assert!(unseen.output.contains("Not visible to your account yet; Svartal is re-linking it."), "{}", unseen.output);
+
+    let unsaid = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_status(context, out, docker, None)
+    });
+    unsaid.outcome.unwrap();
+    assert!(!unsaid.output.contains("visible to your account"), "{}", unsaid.output);
+    assert!(unsaid.output.contains("Your workspace is ready."), "{}", unsaid.output);
 }
 
 #[test]

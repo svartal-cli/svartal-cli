@@ -1023,17 +1023,31 @@ pub fn host_up(
     .map_err(CliError)?;
     writeln!(out, "Machine {name} is running (container {}).", instance.container()).ok();
 
+    // Done means the person can see their workspace. A ready workspace the
+    // account has no live link to is the case this waits through: Svartal
+    // repairs it (the poll itself is what asks it to), and saying "ready" in
+    // the meantime would be a success the same person's `sv machines` calls
+    // `not linked`.
     let mut last = String::new();
+    let mut running_but_unseen = false;
     for _ in 0..HOST_WAIT_ATTEMPTS {
         let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &registration.machine.id)
             .map_err(CliError::of)?;
-        let sentence = host::intent_sentence(status.workspace_intent.as_ref());
+        let state = status.workspace_intent.as_ref().map(|intent| intent.lifecycle_state.as_str());
+        // `None` is an older Svartal, or a machine with no workspace yet:
+        // neither is a reason to keep a person waiting.
+        running_but_unseen = state == Some("ready") && status.linked == Some(false);
+        let sentence = if running_but_unseen {
+            host::NOT_VISIBLE_YET_SENTENCE.to_string()
+        } else {
+            host::intent_sentence(status.workspace_intent.as_ref())
+        };
         if sentence != last {
             writeln!(out, "{sentence}").ok();
             last = sentence.clone();
         }
-        match status.workspace_intent.as_ref().map(|intent| intent.lifecycle_state.as_str()) {
-            Some("ready") => {
+        match state {
+            Some("ready") if !running_but_unseen => {
                 writeln!(out, "Run `sv envs` to see it, or `sv shell {name}` to open it.").ok();
                 return Ok(());
             }
@@ -1053,8 +1067,13 @@ pub fn host_up(
         }
         std::thread::sleep(host_poll_interval());
     }
+    let ran_out = if running_but_unseen {
+        "Your workspace is running, but Svartal has not made it visible to your account yet."
+    } else {
+        "The workspace is still not ready after several minutes."
+    };
     Err(CliError(format!(
-        "The workspace is still not ready after several minutes. `sv host status` keeps watching it; `docker logs {}` shows what the machine is doing.",
+        "{ran_out} `sv host status` keeps watching it; `docker logs {}` shows what the machine is doing.",
         instance.container()
     )))
 }
@@ -1111,6 +1130,11 @@ pub fn host_status(
         let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &record.machine_id)
             .map_err(CliError::of)?;
         writeln!(out, "{}", host::intent_sentence(status.workspace_intent.as_ref())).ok();
+        // Whether the account reading this can see the workspace at all: the
+        // one thing `sv machines` would disagree with the line above about.
+        if let Some(visibility) = host::visibility_sentence(status.linked) {
+            writeln!(out, "{visibility}").ok();
+        }
         if let Some(environment_id) = status.workspace_intent.as_ref().and_then(|intent| intent.environment_id.as_deref()) {
             writeln!(out, "Workspace environment {environment_id}; `sv shell {}` opens it.", record.machine_name).ok();
         }

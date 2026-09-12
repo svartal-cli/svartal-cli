@@ -309,6 +309,12 @@ pub struct HostRegistration {
     pub workspace_intent: Option<HostIntent>,
     #[serde(default)]
     pub release: Option<HostRelease>,
+    /// Whether the workspace on this machine is visible to the account that
+    /// asked: `Some(true)` it is, `Some(false)` it is running but the account
+    /// has no live link to it, `None` there is nothing to link yet — or the
+    /// server is older than this answer and never says.
+    #[serde(default)]
+    pub linked: Option<bool>,
 }
 
 fn parse_registration(body: Value, action: &str) -> Result<HostRegistration, ApiError> {
@@ -522,12 +528,29 @@ pub fn recent_logs(docker: &dyn Docker, instance: &Instance) -> String {
         .unwrap_or_default()
 }
 
+/// What `up` says about a workspace that is running but that the account
+/// which started it cannot see yet. Being visible is the whole point of the
+/// command, so `up` keeps waiting on this sentence rather than declaring a
+/// success the person's own `sv machines` would contradict.
+pub const NOT_VISIBLE_YET_SENTENCE: &str = "Your workspace is running but not visible to your account yet; Svartal is fixing that…";
+
+/// The line `sv host status` prints about visibility, or `None` when the
+/// server said nothing about it (no workspace yet, or an older Svartal).
+pub fn visibility_sentence(linked: Option<bool>) -> Option<&'static str> {
+    match linked {
+        Some(true) => Some("Visible to your account in Ivaldi."),
+        Some(false) => Some("Not visible to your account yet; Svartal is re-linking it."),
+        None => None,
+    }
+}
+
 /// The sentence for one workspace state, while `up` waits.
 pub fn intent_sentence(intent: Option<&HostIntent>) -> String {
     match intent.map(|intent| intent.lifecycle_state.as_str()) {
         None | Some("requested") => "Waiting for the machine to pick up your workspace…".to_string(),
         Some("provisioning") => "Creating your workspace container…".to_string(),
         Some("ready") => "Your workspace is ready.".to_string(),
+        Some("relinking") => "Linking your workspace to your account…".to_string(),
         Some("failed") => {
             let code = intent
                 .and_then(|intent| intent.last_error.get("code"))
@@ -738,5 +761,14 @@ mod tests {
             last_error: json!({ "code": "host_capacity_memory" }),
         };
         assert_eq!(intent_sentence(Some(&failed)), "The machine could not create your workspace (host_capacity_memory).");
+        let relinking = HostIntent { lifecycle_state: "relinking".into(), environment_id: None, last_error: json!({}) };
+        assert_eq!(intent_sentence(Some(&relinking)), "Linking your workspace to your account…");
+    }
+
+    #[test]
+    fn visibility_is_said_only_when_svartal_said_it() {
+        assert_eq!(visibility_sentence(Some(true)), Some("Visible to your account in Ivaldi."));
+        assert_eq!(visibility_sentence(Some(false)), Some("Not visible to your account yet; Svartal is re-linking it."));
+        assert_eq!(visibility_sentence(None), None);
     }
 }
