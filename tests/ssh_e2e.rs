@@ -388,8 +388,10 @@ fn make_fixture(sshd: &Sshd) -> Fixture {
     let config_path = home.path().join("ssh_config");
     let block = sshproxy::ssh_config_block(&ConfigBlockInput {
         alias: "svartal-e2e",
+        extra_aliases: &[],
         target: "e2e",
         binary: &harness.display().to_string(),
+        user: sshproxy::SSH_USER,
         identity_file: &client_key.display().to_string(),
         known_hosts_file: &known_hosts.display().to_string(),
     });

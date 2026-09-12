@@ -59,6 +59,22 @@ pub struct Workspace {
     pub short_name: Option<String>,
     pub kind: Option<String>,
     pub lifecycle_state: Option<String>,
+    /// The username whose personal workspace this is. `None` for a shared
+    /// workspace, and also for a server old enough not to send the field at
+    /// all — which is why it is defaulted rather than required: an answer that
+    /// does not say who owns a workspace must not stop the listing.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// What Svartal intends this workspace to be right now: one of the
+    /// lifecycle words (`requested`, `provisioning`, `ready`, `failed`,
+    /// `deprovisioning`, `deprovisioned`, `suspending`, `suspended`,
+    /// `resuming`, `relinking`), or `unclaimed` for a personal workspace with
+    /// no intent behind it at all. `None` for a shared workspace with no
+    /// intent, and also for a server old enough not to send the field, which
+    /// is why it is defaulted: a missing answer must leave the listing exactly
+    /// as it was.
+    #[serde(default)]
+    pub intent_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

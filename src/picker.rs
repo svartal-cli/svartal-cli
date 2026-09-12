@@ -27,23 +27,27 @@ pub struct PickerRow {
     pub label: String,
     pub environment_id: String,
     pub machine_name: Option<String>,
-    /// What connecting would find: the machine's last heartbeat, or the fact
-    /// that there is no link to it at all.
+    /// What connecting would find: the machine's last heartbeat, or the word
+    /// that says why there is no link to it.
     pub state: String,
 }
 
 /// The environments, in the order `sv envs` lists them.
 ///
-/// Workspaces that cannot be connected to are listed as well, marked
-/// `not linked`. Hiding them would leave a person looking for a workspace they
+/// Workspaces that cannot be connected to are listed as well, marked with the
+/// word that says why — `not linked`, or `relinking` for a link Svartal is
+/// putting back. Hiding them would leave a person looking for a workspace they
 /// can see in the web app at an empty list; showing it with its reason is the
 /// answer they need. Picking one prints the same refusal `sv shell` gives.
+/// Somebody else's personal workspace is not on this list at all, and neither
+/// is one nobody owns: the list is what pressing enter opens, and those would
+/// refuse.
 pub fn build_picker_rows(view: &MachinesView, shortnames: &Shortnames) -> Vec<PickerRow> {
-    view::build_env_rows(view, shortnames)
+    view::own_env_rows(&view::build_env_rows(view, shortnames))
         .into_iter()
         .map(|row| PickerRow {
             state: if !row.linked {
-                "not linked".to_string()
+                view::reachable_cell(false, row.intent_state.as_deref())
             } else {
                 row.machine_presence.clone().unwrap_or_else(|| "unknown".to_string())
             },

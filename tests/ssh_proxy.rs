@@ -262,8 +262,10 @@ fn the_config_block_is_the_reference_text() {
     let recorded = fixture("ssh.json");
     let block = sshproxy::ssh_config_block(&ConfigBlockInput {
         alias: recorded["alias"].as_str().expect("alias"),
+        extra_aliases: &[],
         target: recorded["shortname"].as_str().expect("shortname"),
         binary: "/usr/local/bin/sv",
+        user: sshproxy::SSH_USER,
         identity_file: "/home/person/.config/svartal/ssh/id_ed25519",
         known_hosts_file: "/home/person/.config/svartal/ssh/known_hosts",
     });
@@ -343,7 +345,9 @@ fn the_connect_chain_is_the_reference_chain() {
             .map(str::to_string),
         machine_short_name: None,
         linked: true,
+        belongs_to_another: false,
         machine_presence: Some("unknown".to_string()),
+        intent_state: None,
     };
 
     let socket_url = sshproxy::connect_bridge(
@@ -1033,8 +1037,10 @@ fn the_config_block_is_marker_guarded() {
     let block = |binary: &str| {
         sshproxy::ssh_config_block(&ConfigBlockInput {
             alias: "svartal-web",
+            extra_aliases: &[],
             target: "web",
             binary,
+            user: sshproxy::SSH_USER,
             identity_file: "/keys/id_ed25519",
             known_hosts_file: "/keys/known_hosts",
         })
@@ -1079,8 +1085,10 @@ fn a_config_file_is_created_owner_only() {
     let path = directory.path().join(".ssh").join("config");
     let block = sshproxy::ssh_config_block(&ConfigBlockInput {
         alias: "svartal-web",
+        extra_aliases: &[],
         target: "web",
         binary: "sv",
+        user: sshproxy::SSH_USER,
         identity_file: "/keys/id_ed25519",
         known_hosts_file: "/keys/known_hosts",
     });
@@ -1114,8 +1122,10 @@ fn a_symlinked_config_is_followed_rather_than_replaced() {
 
     let block = sshproxy::ssh_config_block(&ConfigBlockInput {
         alias: "svartal-web",
+        extra_aliases: &[],
         target: "web",
         binary: "sv",
+        user: sshproxy::SSH_USER,
         identity_file: "/keys/id_ed25519",
         known_hosts_file: "/keys/known_hosts",
     });
@@ -1148,8 +1158,10 @@ fn an_existing_config_keeps_the_mode_it_had() {
 
     let block = sshproxy::ssh_config_block(&ConfigBlockInput {
         alias: "svartal-web",
+        extra_aliases: &[],
         target: "web",
         binary: "sv",
+        user: sshproxy::SSH_USER,
         identity_file: "/keys/id_ed25519",
         known_hosts_file: "/keys/known_hosts",
     });
@@ -1171,8 +1183,10 @@ fn a_symlinked_ssh_directory_is_written_into() {
 
     let block = sshproxy::ssh_config_block(&ConfigBlockInput {
         alias: "svartal-web",
+        extra_aliases: &[],
         target: "web",
         binary: "sv",
+        user: sshproxy::SSH_USER,
         identity_file: "/keys/id_ed25519",
         known_hosts_file: "/keys/known_hosts",
     });
@@ -1188,8 +1202,10 @@ fn a_symlinked_ssh_directory_is_written_into() {
 fn a_path_with_a_space_is_quoted() {
     let block = sshproxy::ssh_config_block(&ConfigBlockInput {
         alias: "svartal-web",
+        extra_aliases: &[],
         target: "web",
         binary: "/Applications/My Tools/sv",
+        user: sshproxy::SSH_USER,
         identity_file: "/home/a b/id_ed25519",
         known_hosts_file: "/home/a b/known_hosts",
     });
@@ -1201,6 +1217,70 @@ fn a_path_with_a_space_is_quoted() {
         block.contains("IdentityFile \"/home/a b/id_ed25519\""),
         "{block}"
     );
+}
+
+/// A machine that is not a managed workspace has a login account of its own,
+/// and `--user` is how a person says so. Nothing else in the block moves.
+#[test]
+fn a_named_user_is_the_account_in_the_block() {
+    let block = sshproxy::ssh_config_block(&ConfigBlockInput {
+        alias: "svartal-web",
+        extra_aliases: &[],
+        target: "web",
+        binary: "sv",
+        user: "marc",
+        identity_file: "/keys/id_ed25519",
+        known_hosts_file: "/keys/known_hosts",
+    });
+    assert!(block.contains("\n  User marc\n"), "{block}");
+    assert!(!block.contains("User svartal"), "{block}");
+}
+
+/// A link made elsewhere names the workspace id, because it cannot know the
+/// short names this machine keeps. Both hosts go on one `Host` line, and
+/// `HostKeyAlias` keeps `known_hosts` keyed by the primary one — the alias
+/// `sv ssh-proxy` records the key under. The `ProxyCommand` still carries the
+/// word that resolves, not the second alias.
+#[test]
+fn a_second_alias_shares_the_primary_host_key() {
+    let block = sshproxy::ssh_config_block(&ConfigBlockInput {
+        alias: "svartal-web",
+        extra_aliases: &["svartal-env-9f3c".to_string()],
+        target: "web",
+        binary: "sv",
+        user: sshproxy::SSH_USER,
+        identity_file: "/keys/id_ed25519",
+        known_hosts_file: "/keys/known_hosts",
+    });
+    assert!(
+        block.contains("\nHost svartal-web svartal-env-9f3c\n"),
+        "{block}"
+    );
+    assert!(block.contains("\n  HostKeyAlias svartal-web\n"), "{block}");
+    assert!(block.contains("ProxyCommand sv ssh-proxy web"), "{block}");
+    // The markers stay keyed on the primary alias, so the block is still the
+    // one `apply_ssh_config_block` replaces.
+    assert!(
+        block.starts_with("# >>> sv ssh-setup svartal-web >>>"),
+        "{block}"
+    );
+}
+
+/// With one alias there is nothing to reconcile: `ssh` keys the host by the
+/// name it was given, and an extra line would only be noise.
+#[test]
+fn one_alias_gets_no_host_key_alias() {
+    let block = sshproxy::ssh_config_block(&ConfigBlockInput {
+        alias: "svartal-web",
+        extra_aliases: &[],
+        target: "web",
+        binary: "sv",
+        user: sshproxy::SSH_USER,
+        identity_file: "/keys/id_ed25519",
+        known_hosts_file: "/keys/known_hosts",
+    });
+    assert!(block.contains("\nHost svartal-web\n"), "{block}");
+    assert!(!block.contains("HostKeyAlias"), "{block}");
 }
 
 #[test]
@@ -1249,7 +1329,9 @@ fn ssh_setup_writes_the_key_and_the_block() {
     let outcome = sshproxy::run_ssh_setup(&sshproxy::SetupInput {
         state_directory: state.path(),
         target: "web",
+        extra_aliases: &[],
         binary: "/usr/local/bin/sv",
+        user: sshproxy::SSH_USER,
         ssh_config_path: &config_path,
         print: false,
         reset_hosts: false,
@@ -1297,7 +1379,9 @@ fn ssh_setup_print_writes_nothing() {
     let outcome = sshproxy::run_ssh_setup(&sshproxy::SetupInput {
         state_directory: state.path(),
         target: "web",
+        extra_aliases: &[],
         binary: "/usr/local/bin/sv",
+        user: sshproxy::SSH_USER,
         ssh_config_path: &config_path,
         print: true,
         reset_hosts: false,
@@ -1324,7 +1408,9 @@ fn ssh_setup_reset_hosts_forgets_only_this_alias() {
     let outcome = sshproxy::run_ssh_setup(&sshproxy::SetupInput {
         state_directory: state.path(),
         target: "web",
+        extra_aliases: &[],
         binary: "sv",
+        user: sshproxy::SSH_USER,
         ssh_config_path: &config_path,
         print: false,
         reset_hosts: true,
@@ -1378,7 +1464,7 @@ fn spaced_view() -> svartal::view::MachinesView {
         serde_json::from_value(spaced_machines()["data"].clone()).expect("machines");
     let links: Vec<svartal::api::LinkRecord> =
         serde_json::from_value(spaced_links()["environments"].clone()).expect("links");
-    svartal::view::build_machines_view(&machines, &links)
+    svartal::view::build_machines_view(&machines, &links, Some("person"))
 }
 
 /// Run `sv ssh-setup <target>` against that machine, in a throwaway home, and
@@ -1386,6 +1472,7 @@ fn spaced_view() -> svartal::view::MachinesView {
 fn run_ssh_setup_command(
     tag: &str,
     target: &str,
+    user: &str,
     names: &svartal::shortnames::Shortnames,
 ) -> String {
     let recorded = fixture("oidc.json");
@@ -1447,7 +1534,7 @@ fn run_ssh_setup_command(
     };
 
     let mut out: Vec<u8> = Vec::new();
-    svartal::commands::ssh_setup(&context, &mut out, &environment, target, false, false)
+    svartal::commands::ssh_setup(&context, &mut out, &environment, target, user, false, false)
         .expect("ssh-setup");
     std::fs::read_to_string(home.path().join(".ssh").join("config")).expect("the block")
 }
@@ -1461,6 +1548,7 @@ fn a_target_with_no_short_name_gets_a_proxy_command_that_resolves() {
     let block = run_ssh_setup_command(
         "ssh-setup-spaced",
         "My Box",
+        sshproxy::SSH_USER,
         &svartal::shortnames::Shortnames::new(),
     );
     let token = proxy_command_target(&block);
@@ -1490,9 +1578,15 @@ fn a_target_with_no_short_name_gets_a_proxy_command_that_resolves() {
 fn a_recorded_short_name_is_the_word_the_proxy_command_carries() {
     let mut names = svartal::shortnames::Shortnames::new();
     names.assign("box", "env-9f3c").expect("name");
-    let block = run_ssh_setup_command("ssh-setup-named", "My Box", &names);
+    let block = run_ssh_setup_command("ssh-setup-named", "My Box", sshproxy::SSH_USER, &names);
     assert_eq!(proxy_command_target(&block), "box");
-    assert!(block.contains("Host svartal-box"), "{block}");
+    // And the workspace id reaches it too, for a link made where the short
+    // names are not known, checking the key recorded under `svartal-box`.
+    assert!(
+        block.contains("Host svartal-box svartal-env-9f3c"),
+        "{block}"
+    );
+    assert!(block.contains("HostKeyAlias svartal-box"), "{block}");
     assert_eq!(
         svartal::target::select_shell_target(&spaced_view(), &names, "box")
             .expect("the written token resolves")
@@ -1662,6 +1756,8 @@ fn connect_with_endpoint(http_base: &str, ws_base: &str) -> String {
         machine_short_name: None,
         linked: true,
         machine_presence: Some("unknown".to_string()),
+        intent_state: None,
+        belongs_to_another: false,
     };
     sshproxy::connect_bridge(
         &http,

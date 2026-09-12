@@ -45,7 +45,7 @@ fn view(presence: &str) -> MachinesView {
         }))
         .unwrap(),
     ];
-    build_machines_view(&machines, &links)
+    build_machines_view(&machines, &links, Some("person"))
 }
 
 fn rows() -> Vec<PickerRow> {
@@ -75,6 +75,36 @@ fn every_environment_is_listed_with_its_name_and_what_connecting_would_find() {
     // A machine that never checked in says so rather than claiming offline.
     let quiet = build_picker_rows(&view("unknown"), &Shortnames::new());
     assert_eq!(quiet[0].state, "unknown");
+}
+
+#[test]
+fn a_link_being_restored_says_so_and_one_nobody_owns_is_not_offered() {
+    let machines: Vec<Machine> = vec![
+        serde_json::from_value(json!({
+            "id": "machine-1",
+            "name": "workbench",
+            "origin": "donated",
+            "lifecycleState": "open",
+            "presence": "online",
+            "lastSeenAt": null,
+            "environments": [
+                { "id": "row-1", "environmentId": "env-relinking", "label": "Coming back", "kind": "personal", "owner": "person", "lifecycleState": "active", "intentState": "relinking" },
+                { "id": "row-2", "environmentId": "env-unclaimed", "label": "Nobody's", "kind": "personal", "lifecycleState": "active", "intentState": "unclaimed" },
+            ],
+        }))
+        .unwrap(),
+    ];
+    let listed =
+        build_picker_rows(&build_machines_view(&machines, &[], Some("person")), &Shortnames::new());
+    assert_eq!(
+        listed
+            .iter()
+            .map(|row| (row.environment_id.as_str(), row.state.as_str()))
+            .collect::<Vec<_>>(),
+        // The relinking one is listed with what to expect. The one nobody owns
+        // is not here at all, because pressing enter on it could only refuse.
+        vec![("env-relinking", "relinking")]
+    );
 }
 
 // -- the keys --------------------------------------------------------------

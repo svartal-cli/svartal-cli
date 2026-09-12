@@ -60,7 +60,11 @@ A target is a short name, a workspace id, a workspace name, or a machine name.
 
 Options:
   --json             Emit JSON instead of a table (whoami, machines, envs,
-                     sessions, add).
+                     sessions, add). The machines and envs listings then carry
+                     every workspace, other people's included, with its owner.
+  --all              Also list personal workspaces belonging to somebody else,
+                     with an OWNER column (machines, envs). Without it a
+                     listing is yours alone.
   --no-browser       Print the sign-in URL instead of opening a browser (login).
   --machine <name>   Name the machine rather than a workspace (name).
   --remove <name>    Forget a short name (name).
@@ -85,6 +89,8 @@ Options:
                      (ssh-setup).
   --reset-hosts      Forget the workspace host key recorded for this host
                      first (ssh-setup).
+  --user <account>   The account to log in as (ssh-setup). Default svartal; a
+                     personal machine uses its own user.
   --project <p>      The Svartal project, as owner/slug or id (issue).
   --kind <kind>      issue, bug, chore, investigation, idea or plan (issue
                      post).
@@ -153,10 +159,11 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "login" => &["--no-browser"],
         "shell" | "claude" | "close" => &["--terminal-id"],
         "name" => &["--machine", "--remove"],
-        "ssh-setup" => &["--print", "--reset-hosts"],
+        "ssh-setup" => &["--print", "--reset-hosts", "--user"],
         "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
         "host" => &["--image", "--instance", "--name", "--purge"],
-        "whoami" | "machines" | "envs" | "sessions" => &["--json"],
+        "machines" | "envs" => &["--json", "--all"],
+        "whoami" | "sessions" => &["--json"],
         "issue" => &[
             "--json",
             "--project",
@@ -172,6 +179,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         _ => &[],
     };
     let mut json = false;
+    let mut all = false;
     let mut no_browser = false;
     let mut terminal_id: Option<String> = None;
     let mut removed_name: Option<String> = None;
@@ -182,6 +190,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut token_file: Option<String> = None;
     let mut print_block = false;
     let mut reset_hosts = false;
+    let mut ssh_user: Option<String> = None;
     let mut host_image: Option<String> = None;
     let mut host_name: Option<String> = None;
     let mut host_instance: Option<String> = None;
@@ -209,6 +218,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         }
         match argument.as_str() {
             "--json" => json = true,
+            "--all" => all = true,
             "--no-browser" => no_browser = true,
             "--terminal-id" => {
                 terminal_id = Some(
@@ -235,6 +245,13 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             "--publish-only" => publish_only = true,
             "--print" => print_block = true,
             "--reset-hosts" => reset_hosts = true,
+            "--user" => {
+                ssh_user = Some(
+                    rest.next()
+                        .ok_or_else(|| "--user needs the account to log in as.".to_string())?
+                        .clone(),
+                );
+            }
             "--print-token" => print_token = true,
             "--purge" => purge = true,
             "--name" => {
@@ -298,8 +315,8 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "login" => commands::login(&context, &mut stdout),
         "logout" => commands::logout(&context, &mut stdout),
         "whoami" => commands::whoami(&context, &mut stdout, json),
-        "machines" => commands::machines(&context, &mut stdout, json),
-        "envs" => commands::envs(&context, &mut stdout, json),
+        "machines" => commands::machines(&context, &mut stdout, json, all),
+        "envs" => commands::envs(&context, &mut stdout, json, all),
         "name" => match (removed_name.as_deref(), positional.first().copied(), positional.get(1).copied()) {
             (Some(name), _, _) => commands::remove_name(&context, &mut stdout, name),
             (None, None, _) => commands::list_names(&context, &mut stdout),
@@ -368,7 +385,16 @@ fn run(arguments: &[String]) -> Result<u8, String> {
                         .to_string(),
                 );
             };
-            commands::ssh_setup(&context, &mut stdout, &environment, target, print_block, reset_hosts)
+            let user = ssh_user.as_deref().unwrap_or(svartal::sshproxy::SSH_USER);
+            commands::ssh_setup(
+                &context,
+                &mut stdout,
+                &environment,
+                target,
+                user,
+                print_block,
+                reset_hosts,
+            )
         }
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
         "issue" => {

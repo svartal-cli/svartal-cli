@@ -25,9 +25,21 @@ pub struct WorkspaceRow {
     pub short_name: Option<String>,
     pub kind: String,
     pub lifecycle_state: String,
+    /// The username whose personal workspace this is, when Svartal said so.
+    pub owner: Option<String>,
     /// True when this identity holds a relay link to the workspace.
     pub linked: bool,
     pub linked_at: Option<String>,
+    /// What Svartal intends this workspace to be, when it said so. It is the
+    /// difference between a link that is gone and a link that is coming back;
+    /// see `reachable_cell`.
+    pub intent_state: Option<String>,
+    /// A personal workspace owned by somebody else. Not printed and not
+    /// serialised: it is a judgement about the person reading the listing,
+    /// not a fact about the workspace, so it is recomputed every time a view
+    /// is built and never travels anywhere.
+    #[serde(skip)]
+    pub belongs_to_another: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,9 +52,33 @@ pub struct MachinesView {
     pub unregistered_links: Vec<LinkRecord>,
 }
 
+impl MachinesView {
+    /// The same view with other people's personal workspaces left out.
+    ///
+    /// This is what a listing shows by default. A second person's personal
+    /// workspace on a machine you own is on your machine, but it is not yours
+    /// to open, and a list of things you cannot open is not your list. The
+    /// same goes for an unclaimed one: nobody owns it and nobody can open it
+    /// (`--all` still shows it, marked `unclaimed`).
+    pub fn yours(&self) -> Self {
+        Self {
+            rows: self
+                .rows
+                .iter()
+                .filter(|row| {
+                    !row.belongs_to_another
+                        && !unclaimed(&row.kind, row.linked, row.intent_state.as_deref())
+                })
+                .cloned()
+                .collect(),
+            unregistered_links: self.unregistered_links.clone(),
+        }
+    }
+}
+
 /// Said once, everywhere the CLI would otherwise imply it knows more than it
 /// does.
-pub const MACHINE_STATE_NOTE: &str = "REACHABLE is your relay link, not a live check. HEARTBEAT is the box's last heartbeat: unknown means it has never reported.";
+pub const MACHINE_STATE_NOTE: &str = "REACHABLE is your relay link, not a live check: relinking means Svartal is restoring your link, so run `sv host up` on that machine; unclaimed means nobody owns that workspace. HEARTBEAT is the box's last heartbeat: unknown means it has never reported.";
 
 /// A machine as one cell: the word its owner chose, with the name the host
 /// derived from its own hostname kept in brackets so nothing a person already
@@ -57,6 +93,23 @@ pub fn machine_cell(name: &str, short_name: Option<&str>) -> String {
 
 pub const SESSIONS_NOT_EXPOSED_NOTE: &str = "Live agent sessions are not readable with a terminal sign-in yet. They live on the workspace itself and need a connected session, which this CLI cannot open yet. See NOTES.md in the svartal-cli package.";
 
+/// Whether a workspace belongs to somebody other than the person reading the
+/// listing.
+///
+/// All three facts have to be there: the workspace is a personal one, Svartal
+/// named its owner, and this terminal knows the name it is signed in under. An
+/// answer missing any of them is not evidence that a workspace is somebody
+/// else's, and hiding a row on a guess would lose a person their own
+/// workspace. Older servers send no owner at all, and that is exactly the case
+/// this keeps unchanged.
+fn belongs_to_another(kind: Option<&str>, owner: Option<&str>, viewer: Option<&str>) -> bool {
+    let (Some(owner), Some(viewer)) = (owner, viewer) else {
+        return false;
+    };
+    let same = |left: &str, right: &str| left.trim().eq_ignore_ascii_case(right.trim());
+    kind.map(str::trim) == Some("personal") && !same(owner, viewer)
+}
+
 fn present(value: Option<&str>, fallback: &str) -> String {
     match value.map(str::trim) {
         Some(text) if !text.is_empty() => text.to_string(),
@@ -64,7 +117,17 @@ fn present(value: Option<&str>, fallback: &str) -> String {
     }
 }
 
-pub fn build_machines_view(machines: &[Machine], links: &[LinkRecord]) -> MachinesView {
+/// The joined listing, as seen by one person.
+///
+/// `viewer` is the username this terminal is signed in as, when the session
+/// carries one. It decides nothing about what Svartal returned; it only marks
+/// which rows are somebody else's personal workspace, which the listings and
+/// target resolution then leave out.
+pub fn build_machines_view(
+    machines: &[Machine],
+    links: &[LinkRecord],
+    viewer: Option<&str>,
+) -> MachinesView {
     let mut rows = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for machine in machines {
@@ -83,8 +146,15 @@ pub fn build_machines_view(machines: &[Machine], links: &[LinkRecord]) -> Machin
                 short_name: workspace.short_name.clone(),
                 kind: present(workspace.kind.as_deref(), "-"),
                 lifecycle_state: present(workspace.lifecycle_state.as_deref(), "-"),
+                owner: workspace.owner.clone(),
                 linked: link.is_some(),
                 linked_at: link.map(|link| link.linked_at.clone()),
+                intent_state: workspace.intent_state.clone(),
+                belongs_to_another: belongs_to_another(
+                    workspace.kind.as_deref(),
+                    workspace.owner.as_deref(),
+                    viewer,
+                ),
             });
         }
     }
@@ -132,28 +202,71 @@ pub fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     lines.join("\n")
 }
 
-pub fn format_machines_view(view: &MachinesView) -> String {
+/// The username column's cell: the owner Svartal named, or a dash when it
+/// named none.
+fn owner_cell(owner: Option<&String>) -> String {
+    owner.cloned().unwrap_or_else(|| "-".to_string())
+}
+
+/// The `REACHABLE` cell: whether this identity can open the workspace, and
+/// when it cannot, the one word that says why.
+///
+/// A link is either there or it is not, but `not linked` was three different
+/// situations wearing one word. Svartal's intent tells them apart: `relinking`
+/// is a link it is putting back, and `unclaimed` is a personal workspace
+/// nobody owns. Every other answer, including a server old enough to send no
+/// intent at all, keeps reading `not linked` exactly as before.
+///
+/// Said in one place because three listings print this cell — `sv machines`,
+/// `sv envs`, and the picker — and a person comparing them must not find three
+/// different words for one workspace.
+pub fn reachable_cell(linked: bool, intent_state: Option<&str>) -> String {
+    if linked {
+        return "linked".to_string();
+    }
+    match intent_state.map(str::trim) {
+        Some("relinking") => "relinking".to_string(),
+        Some("unclaimed") => "unclaimed".to_string(),
+        _ => "not linked".to_string(),
+    }
+}
+
+/// `show_owner` is `--all`: the column exists only in the listing that shows
+/// other people's workspaces, because that is the only listing where the
+/// answer is ever anything but yourself.
+pub fn format_machines_view(view: &MachinesView, show_owner: bool) -> String {
     if view.rows.is_empty() && view.unregistered_links.is_empty() {
         return "No machines yet. Register one in the Svartal web app, then link it from the box."
             .to_string();
     }
     let mut sections: Vec<String> = Vec::new();
     if !view.rows.is_empty() {
+        let mut headers = vec!["MACHINE", "WORKSPACE", "WORKSPACE ID", "KIND"];
+        if show_owner {
+            headers.push("OWNER");
+        }
+        headers.extend(["STATE", "REACHABLE", "HEARTBEAT"]);
         sections.push(render_table(
-            &["MACHINE", "WORKSPACE", "WORKSPACE ID", "KIND", "STATE", "REACHABLE", "HEARTBEAT"],
+            &headers,
             &view
                 .rows
                 .iter()
                 .map(|row| {
-                    vec![
+                    let mut cells = vec![
                         machine_cell(&row.machine_name, row.machine_short_name.as_deref()),
                         row.short_name.clone().unwrap_or_else(|| row.label.clone()),
                         row.environment_id.clone(),
                         row.kind.clone(),
+                    ];
+                    if show_owner {
+                        cells.push(owner_cell(row.owner.as_ref()));
+                    }
+                    cells.extend([
                         row.lifecycle_state.clone(),
-                        if row.linked { "linked".to_string() } else { "not linked".to_string() },
+                        reachable_cell(row.linked, row.intent_state.as_deref()),
                         row.machine_presence.clone(),
-                    ]
+                    ]);
+                    cells
                 })
                 .collect::<Vec<_>>(),
         ));
@@ -193,8 +306,15 @@ pub struct EnvRow {
     pub machine_name: Option<String>,
     pub kind: String,
     pub lifecycle_state: String,
+    /// The username whose personal workspace this is, when Svartal said so.
+    pub owner: Option<String>,
     pub linked: bool,
+    /// What Svartal intends this workspace to be; see `reachable_cell`.
+    pub intent_state: Option<String>,
     pub machine_presence: Option<String>,
+    /// A personal workspace owned by somebody else; see `WorkspaceRow`.
+    #[serde(skip)]
+    pub belongs_to_another: bool,
 }
 
 pub fn build_env_rows(
@@ -217,8 +337,11 @@ pub fn build_env_rows(
             machine_name: Some(machine_cell(&row.machine_name, row.machine_short_name.as_deref())),
             kind: row.kind.clone(),
             lifecycle_state: row.lifecycle_state.clone(),
+            owner: row.owner.clone(),
             linked: row.linked,
+            intent_state: row.intent_state.clone(),
             machine_presence: Some(row.machine_presence.clone()),
+            belongs_to_another: row.belongs_to_another,
         })
         .collect();
     for link in &view.unregistered_links {
@@ -229,10 +352,16 @@ pub fn build_env_rows(
             machine_name: None,
             kind: "-".to_string(),
             lifecycle_state: "-".to_string(),
+            owner: None,
             // A link record is the proof of reachability, so these are linked
             // by definition.
             linked: true,
+            // A link record carries no intent, and a linked row never needs
+            // one: the cell reads `linked` either way.
+            intent_state: None,
             machine_presence: None,
+            // A link this identity holds is never somebody else's workspace.
+            belongs_to_another: false,
         });
     }
     rows
@@ -241,25 +370,61 @@ pub fn build_env_rows(
 pub const NO_ENVIRONMENTS: &str =
     "No workspaces yet. Register a machine in the Svartal web app, then link it from the box.";
 
-pub fn format_envs_view(rows: &[EnvRow]) -> String {
+/// The rows of your own listing: everything except a personal workspace that
+/// belongs to somebody else, or one that belongs to nobody at all.
+///
+/// An unclaimed personal workspace has nobody's intent behind it and no link
+/// to it: nobody owns it and nobody can open it, so it is a leftover, not a
+/// row in this person's list. `--all` still shows it, marked `unclaimed`,
+/// because something that exists has to be findable somewhere. A row from a
+/// server that sends no intent is untouched by this: not knowing is not a
+/// reason to drop somebody's workspace.
+pub fn own_env_rows(rows: &[EnvRow]) -> Vec<EnvRow> {
+    rows.iter().filter(|row| !row.belongs_to_another && !is_unclaimed(row)).cloned().collect()
+}
+
+/// A personal workspace with nobody's intent behind it and no link to it.
+/// One rule for `sv machines` (`MachinesView::yours`) and `sv envs`
+/// (`own_env_rows`), so the two default listings never disagree about a row.
+fn unclaimed(kind: &str, linked: bool, intent_state: Option<&str>) -> bool {
+    kind.trim() == "personal" && !linked && intent_state.map(str::trim) == Some("unclaimed")
+}
+
+fn is_unclaimed(row: &EnvRow) -> bool {
+    unclaimed(&row.kind, row.linked, row.intent_state.as_deref())
+}
+
+/// `show_owner` is `--all`, exactly as in `format_machines_view`.
+pub fn format_envs_view(rows: &[EnvRow], show_owner: bool) -> String {
     if rows.is_empty() {
         return NO_ENVIRONMENTS.to_string();
     }
+    let mut headers = vec!["SHORTNAME", "WORKSPACE", "WORKSPACE ID", "MACHINE", "KIND"];
+    if show_owner {
+        headers.push("OWNER");
+    }
+    headers.extend(["STATE", "REACHABLE", "HEARTBEAT"]);
     render_table(
-        &["SHORTNAME", "WORKSPACE", "WORKSPACE ID", "MACHINE", "KIND", "STATE", "REACHABLE", "HEARTBEAT"],
+        &headers,
         &rows
             .iter()
             .map(|row| {
-                vec![
+                let mut cells = vec![
                     row.shortname.clone().unwrap_or_else(|| "-".to_string()),
                     row.label.clone(),
                     row.environment_id.clone(),
                     row.machine_name.clone().unwrap_or_else(|| "-".to_string()),
                     row.kind.clone(),
+                ];
+                if show_owner {
+                    cells.push(owner_cell(row.owner.as_ref()));
+                }
+                cells.extend([
                     row.lifecycle_state.clone(),
-                    if row.linked { "linked".to_string() } else { "not linked".to_string() },
+                    reachable_cell(row.linked, row.intent_state.as_deref()),
                     row.machine_presence.clone().unwrap_or_else(|| "-".to_string()),
-                ]
+                ]);
+                cells
             })
             .collect::<Vec<_>>(),
     )

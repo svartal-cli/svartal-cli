@@ -208,7 +208,8 @@ fn load_session_and_view(
     });
     let machines: Vec<Machine> = machines.map_err(CliError::of)?;
     let links: Vec<LinkRecord> = links.map_err(CliError::of)?;
-    Ok((session, view::build_machines_view(&machines, &links)))
+    let viewer = session.user.preferred_username.clone();
+    Ok((session, view::build_machines_view(&machines, &links, viewer.as_deref())))
 }
 
 /// The stored short names, or none.
@@ -220,14 +221,27 @@ fn stored_shortnames(context: &Context<'_>) -> Shortnames {
     shortnames::read_shortnames(&context.config.state_directory).unwrap_or_default()
 }
 
-pub fn machines(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Result<(), CliError> {
+/// `sv machines`.
+///
+/// Somebody else's personal workspace on a machine you own is left out unless
+/// `--all` asks for it, and only then is there an `OWNER` column to explain
+/// what the extra rows are. `--json` is the scripting surface and always
+/// carries every row, each with its `owner`: a program filtering a listing can
+/// do it itself, and a program missing rows cannot.
+pub fn machines(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    json: bool,
+    all: bool,
+) -> Result<(), CliError> {
     let loaded = load_view(context)?;
     if json {
         writeln!(out, "{}", view::format_machines_json(&loaded)).ok();
         return Ok(());
     }
-    writeln!(out, "{}", view::format_machines_view(&loaded)).ok();
-    if !loaded.rows.is_empty() {
+    let shown = if all { loaded } else { loaded.yours() };
+    writeln!(out, "{}", view::format_machines_view(&shown, all)).ok();
+    if !shown.rows.is_empty() {
         writeln!(out).ok();
         writeln!(out, "{}", view::MACHINE_STATE_NOTE).ok();
     }
@@ -239,14 +253,22 @@ pub fn machines(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Resul
 /// The same two listings `sv machines` joins, with the workspace as the subject
 /// and the short name in front of it. `sv machines` is unchanged: it is the
 /// command the npm CLI also has, and the two are meant to print the same thing.
-pub fn envs(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Result<(), CliError> {
+pub fn envs(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    json: bool,
+    all: bool,
+) -> Result<(), CliError> {
     let view = load_view(context)?;
     let rows = view::build_env_rows(&view, &stored_shortnames(context));
     if json {
         writeln!(out, "{}", view::format_envs_json(&rows)).ok();
         return Ok(());
     }
-    writeln!(out, "{}", view::format_envs_view(&rows)).ok();
+    // `--all` and its `OWNER` column go together, for the reason `machines`
+    // gives.
+    let rows = if all { rows } else { view::own_env_rows(&rows) };
+    writeln!(out, "{}", view::format_envs_view(&rows, all)).ok();
     if !rows.is_empty() {
         writeln!(out).ok();
         writeln!(out, "{}", view::MACHINE_STATE_NOTE).ok();
@@ -386,7 +408,7 @@ pub fn name(
         crate::target::Resolution::Missing(_) => {
             return Err(CliError(format!(
                 "No workspace called {target}. Run `sv envs` to see them:\n\n{}",
-                view::format_envs_view(&view::build_env_rows(&view, &stored))
+                view::format_envs_view(&view::own_env_rows(&view::build_env_rows(&view, &stored)), false)
             )));
         }
     };
@@ -840,11 +862,19 @@ where
 /// `ssh` hands that word straight back to `sv ssh-proxy` with nothing else, so
 /// the display name the person typed ("My Box", a label the workspace can
 /// rename underneath them) would not survive the trip.
+///
+/// The block also answers to `svartal-<workspace-id>` when that is not already
+/// the alias, because a link made somewhere with no view of this machine's
+/// short names can only name the id.
+///
+/// `user` is the account to log in as. `sshproxy::SSH_USER` on a managed
+/// workspace, and whatever `--user` said on a machine with its own accounts.
 pub fn ssh_setup(
     context: &Context<'_>,
     out: &mut dyn Write,
     environment: &crate::config::Environment,
     target: &str,
+    user: &str,
     print: bool,
     reset_hosts: bool,
 ) -> Result<(), CliError> {
@@ -860,10 +890,24 @@ pub fn ssh_setup(
         .map(str::to_string)
         .unwrap_or_else(|| resolved.environment_id.clone());
 
+    // The block answers to the workspace id as well, whenever the short name
+    // is not already it. A deep link made elsewhere — the web app — knows the
+    // id and not the names this machine keeps, so `ssh svartal-<id>` has to
+    // land on the same host.
+    let primary = sshproxy::host_alias(&name);
+    let id_alias = sshproxy::host_alias(&resolved.environment_id);
+    let extra_aliases = if id_alias == primary {
+        Vec::new()
+    } else {
+        vec![id_alias]
+    };
+
     let outcome = sshproxy::run_ssh_setup(&sshproxy::SetupInput {
         state_directory: &context.config.state_directory,
         target: &name,
+        extra_aliases: &extra_aliases,
         binary: &sshproxy::invoked_binary_path(),
+        user,
         ssh_config_path: &ssh_config_path,
         print,
         reset_hosts,
@@ -1209,17 +1253,31 @@ pub fn host_up(
     let reads_as = registration.machine.short_name.clone().unwrap_or_else(|| name.clone());
     writeln!(out, "Machine {reads_as} is running (container {}).", instance.container()).ok();
 
+    // Done means the person can see their workspace. A ready workspace the
+    // account has no live link to is the case this waits through: Svartal
+    // repairs it (the poll itself is what asks it to), and saying "ready" in
+    // the meantime would be a success the same person's `sv machines` calls
+    // `not linked`.
     let mut last = String::new();
+    let mut running_but_unseen = false;
     for _ in 0..HOST_WAIT_ATTEMPTS {
         let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &registration.machine.id)
             .map_err(CliError::of)?;
-        let sentence = host::intent_sentence(status.workspace_intent.as_ref());
+        let state = status.workspace_intent.as_ref().map(|intent| intent.lifecycle_state.as_str());
+        // `None` is an older Svartal, or a machine with no workspace yet:
+        // neither is a reason to keep a person waiting.
+        running_but_unseen = state == Some("ready") && status.linked == Some(false);
+        let sentence = if running_but_unseen {
+            host::NOT_VISIBLE_YET_SENTENCE.to_string()
+        } else {
+            host::intent_sentence(status.workspace_intent.as_ref())
+        };
         if sentence != last {
             writeln!(out, "{sentence}").ok();
             last = sentence.clone();
         }
-        match status.workspace_intent.as_ref().map(|intent| intent.lifecycle_state.as_str()) {
-            Some("ready") => {
+        match state {
+            Some("ready") if !running_but_unseen => {
                 writeln!(out, "Run `sv envs` to see it, or `sv shell {name}` to open it.").ok();
                 return Ok(());
             }
@@ -1239,8 +1297,13 @@ pub fn host_up(
         }
         std::thread::sleep(host_poll_interval());
     }
+    let ran_out = if running_but_unseen {
+        "Your workspace is running, but Svartal has not made it visible to your account yet."
+    } else {
+        "The workspace is still not ready after several minutes."
+    };
     Err(CliError(format!(
-        "The workspace is still not ready after several minutes. `sv host status` keeps watching it; `docker logs {}` shows what the machine is doing.",
+        "{ran_out} `sv host status` keeps watching it; `docker logs {}` shows what the machine is doing.",
         instance.container()
     )))
 }
@@ -1304,6 +1367,11 @@ pub fn host_status(
         let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &record.machine_id)
             .map_err(CliError::of)?;
         writeln!(out, "{}", host::intent_sentence(status.workspace_intent.as_ref())).ok();
+        // Whether the account reading this can see the workspace at all: the
+        // one thing `sv machines` would disagree with the line above about.
+        if let Some(visibility) = host::visibility_sentence(status.linked) {
+            writeln!(out, "{visibility}").ok();
+        }
         if let Some(environment_id) = status.workspace_intent.as_ref().and_then(|intent| intent.environment_id.as_deref()) {
             writeln!(out, "Workspace environment {environment_id}; `sv shell {reads_as}` opens it.").ok();
         }
