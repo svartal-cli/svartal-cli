@@ -8,11 +8,15 @@
 //! The input is the same joined view `sv machines` prints, so the CLI
 //! never resolves against data the person could not have seen.
 //!
-//! A short name recorded with `sv name` is the fourth thing an argument can
-//! be, and it sits in the middle of the order on purpose: below workspace ids,
-//! which are unique and cannot be argued with, and above labels and machine
-//! names, which the person did not choose and which the workspace can rename
-//! underneath them.
+//! A short name is the fourth thing an argument can be, and it sits in the
+//! middle of the order on purpose: below workspace ids, which are unique and
+//! cannot be argued with, and above labels and machine names, which the person
+//! did not choose and which the workspace can rename underneath them.
+//!
+//! Short names now come from Svartal, where the machine's owner assigned them,
+//! so everybody reading a workspace reads the same word. The local
+//! `shortnames.json` is still consulted after them: names given before they
+//! were stored keep working on the laptop that gave them.
 
 use crate::shortnames::Shortnames;
 use crate::view::{MachinesView, WorkspaceRow, render_table};
@@ -21,9 +25,13 @@ use crate::view::{MachinesView, WorkspaceRow, render_table};
 pub struct ShellTarget {
     pub environment_id: String,
     pub label: String,
+    /// The word this workspace's owner gave it in Svartal, when there is one.
+    pub short_name: Option<String>,
     /// None for a workspace that is linked but not on a machine this person can
     /// list.
     pub machine_name: Option<String>,
+    /// The word the machine's owner gave the machine in Svartal.
+    pub machine_short_name: Option<String>,
     /// True when this identity holds a relay link, which is what connecting
     /// needs.
     pub linked: bool,
@@ -103,7 +111,9 @@ fn target_of_row(row: &WorkspaceRow) -> ShellTarget {
     ShellTarget {
         environment_id: row.environment_id.clone(),
         label: row.label.clone(),
+        short_name: row.short_name.clone(),
         machine_name: Some(row.machine_name.clone()),
+        machine_short_name: row.machine_short_name.clone(),
         linked: row.linked,
         machine_presence: Some(row.machine_presence.clone()),
         intent_state: row.intent_state.clone(),
@@ -118,7 +128,9 @@ pub fn shell_targets(view: &MachinesView) -> Vec<ShellTarget> {
         targets.push(ShellTarget {
             environment_id: link.environment_id.clone(),
             label: link.label.clone(),
+            short_name: None,
             machine_name: None,
+            machine_short_name: None,
             linked: true,
             machine_presence: None,
             // A link record carries no intent, and a linked workspace needs
@@ -144,14 +156,18 @@ pub enum Resolution {
 
 /// Resolve one argument against the view.
 ///
-/// The order is workspace id, then short name, then label or machine name.
+/// The order is workspace id, then the short name Svartal holds, then a local
+/// short name, then label or machine name.
 ///
 /// A workspace id wins outright, because ids are unique and a person who typed
-/// one has already been specific. A short name comes next: the person typed it
-/// into `sv name` themselves, so it is the one word here they chose. Labels and
-/// machine names are matched last and on equal footing: if a machine name and a
-/// workspace label both answer to the same word, that is genuinely ambiguous
-/// and the person has to say which.
+/// one has already been specific. Short names come next: they are the only
+/// words here anybody chose. Labels and machine names are matched last and on
+/// equal footing: if a machine name and a workspace label both answer to the
+/// same word, that is genuinely ambiguous and the person has to say which.
+///
+/// A short name is unique to its machine, not globally, so the same word can
+/// name a workspace on two machines. That is listed back as the ambiguity it
+/// is rather than resolved to whichever came first.
 ///
 /// A short name pointing at a workspace that is no longer in the view falls
 /// through to the ordinary matching rather than failing on its own, so a stale
@@ -187,6 +203,17 @@ pub fn resolve_shell_target(
         return Resolution::Resolved(by_id[0].clone());
     }
 
+    let by_short_name: Vec<ShellTarget> = candidates
+        .iter()
+        .filter(|target| target.short_name.as_deref().map(normalize).as_deref() == Some(needle.as_str()))
+        .cloned()
+        .collect();
+    match by_short_name.len() {
+        1 => return Resolution::Resolved(by_short_name.into_iter().next().expect("one match")),
+        0 => {}
+        _ => return Resolution::Ambiguous(by_short_name),
+    }
+
     if let Some(environment_id) = shortnames.environment_of(&needle) {
         let named = normalize(environment_id);
         if let Some(target) =
@@ -202,6 +229,8 @@ pub fn resolve_shell_target(
             normalize(&target.environment_id) == needle
                 || normalize(&target.label) == needle
                 || target.machine_name.as_deref().map(normalize).as_deref() == Some(needle.as_str())
+                || target.machine_short_name.as_deref().map(normalize).as_deref()
+                    == Some(needle.as_str())
         })
         .map(|target| (*target).clone())
         .collect();
@@ -220,8 +249,14 @@ pub fn format_target_candidates(candidates: &[ShellTarget]) -> String {
             .iter()
             .map(|target| {
                 vec![
-                    target.machine_name.clone().unwrap_or_else(|| "-".to_string()),
-                    target.label.clone(),
+                    target
+                        .machine_name
+                        .as_deref()
+                        .map(|name| {
+                            crate::view::machine_cell(name, target.machine_short_name.as_deref())
+                        })
+                        .unwrap_or_else(|| "-".to_string()),
+                    target.short_name.clone().unwrap_or_else(|| target.label.clone()),
                     target.environment_id.clone(),
                 ]
             })
@@ -327,6 +362,7 @@ mod tests {
             id: format!("row-{environment_id}"),
             environment_id: environment_id.to_string(),
             label: Some(label.to_string()),
+            short_name: None,
             kind: Some("personal".to_string()),
             lifecycle_state: Some("active".to_string()),
             owner: owner.map(str::to_string),
@@ -335,6 +371,7 @@ mod tests {
         let machines = vec![Machine {
             id: "machine-1".to_string(),
             name: "m3".to_string(),
+            short_name: None,
             origin: Some("donated".to_string()),
             lifecycle_state: Some("open".to_string()),
             presence: "online".to_string(),
@@ -416,6 +453,7 @@ mod tests {
         let machines = vec![Machine {
             id: "machine-1".to_string(),
             name: "m3".to_string(),
+            short_name: None,
             origin: Some("donated".to_string()),
             lifecycle_state: Some("open".to_string()),
             presence: "online".to_string(),
@@ -424,6 +462,7 @@ mod tests {
                 id: "row-mine".to_string(),
                 environment_id: "env-mine".to_string(),
                 label: Some("Marc".to_string()),
+                short_name: None,
                 kind: Some("personal".to_string()),
                 lifecycle_state: Some("active".to_string()),
                 owner: Some("marc".to_string()),

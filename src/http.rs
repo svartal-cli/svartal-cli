@@ -51,6 +51,10 @@ impl Request {
         Self { method: "POST", url: url.into(), headers: Vec::new(), body: None }
     }
 
+    pub fn patch(url: impl Into<String>) -> Self {
+        Self { method: "PATCH", url: url.into(), headers: Vec::new(), body: None }
+    }
+
     pub fn delete(url: impl Into<String>) -> Self {
         Self { method: "DELETE", url: url.into(), headers: Vec::new(), body: None }
     }

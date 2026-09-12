@@ -208,7 +208,9 @@ fn target_of(fixture: &Value) -> ShellTarget {
     ShellTarget {
         environment_id: fixture["environmentId"].as_str().unwrap().to_string(),
         label: fixture["target"]["label"].as_str().unwrap().to_string(),
+        short_name: None,
         machine_name: Some(fixture["target"]["machineName"].as_str().unwrap().to_string()),
+        machine_short_name: None,
         linked: true,
         machine_presence: Some("unknown".to_string()),
         intent_state: None,

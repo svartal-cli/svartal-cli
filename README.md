@@ -68,7 +68,8 @@ install -m 755 target/release/sv /usr/local/bin/sv
 ```
 
 Shell completion, offline by design — targets complete from the short names
-in `~/.config/svartal/shortnames.json`, the file `sv name` writes:
+cached in `~/.config/svartal/shortnames.json`, which `sv name` keeps in step
+with the names Svartal holds:
 
 ```sh
 # zsh: put it on $fpath as _sv …
@@ -104,16 +105,26 @@ a shell to the one you pick. Up and down (or `j` and `k`) move, enter connects,
 mistake starts waiting for a keystroke.
 
 `sv name <name> <workspace>` records a word for a workspace: `sv name web
-Primary` makes `web` mean that workspace everywhere a target is taken. `sv name`
-alone lists what you have named, and `sv name --remove web` forgets one. Names
-are `[a-z0-9][a-z0-9-]{0,31}`, and a name that is already a workspace id is
+Primary` makes `web` mean that workspace everywhere a target is taken.
+`sv name --machine <name> <machine>` does the same for a box. Both are recorded
+in **Svartal**, not on this computer, so the word shows up in the web app, in
+the desktop app and on your other machines — a machine's owner assigns it, and
+everyone who can see the workspace reads the same one. `sv name` alone lists
+what is named, and `sv name --remove web` forgets one. Names are
+`[a-z0-9][a-z0-9-]{0,31}`, and a name that is already a workspace id is
 refused, because an id always wins and the name would sit there doing nothing.
+
+`shortnames.json` is kept as a local cache so shell completion works with no
+network. Names given before Svartal held them are still read from it, still
+resolve, and are listed under their own heading; naming that workspace again
+replaces them.
 
 When a word could mean more than one thing, the order is:
 
 1. an exact workspace id,
-2. a short name you gave,
-3. a workspace label or a machine name — and if a word matches two of those,
+2. the short name Svartal holds,
+3. a short name left in this computer's file,
+4. a workspace label or a machine name — and if a word matches two of those,
    the CLI asks which rather than guessing.
 
 ## Opening a workspace in a local editor
@@ -316,7 +327,7 @@ Three files, all `0600` in a `0700` directory:
 | ------------------------------- | --------------------------------------------------------- |
 | `svartal.oidc.tokens.v1.json`    | the OIDC token set (`ID-20`)                              |
 | `dpop.jwk.json`                 | the ES256 DPoP proof key                                   |
-| `shortnames.json`               | the words you gave your workspaces                        |
+| `shortnames.json`               | a local cache of workspace names, for completion           |
 | `ssh/id_ed25519`                | the ssh client key `ssh-proxy` presents (`0600`)          |
 | `ssh/known_hosts`               | the workspace host keys the bridge has handed over        |
 
@@ -326,7 +337,9 @@ once after updating.
 
 `shortnames.json` is a flat map of name to workspace id, with no version field
 and no wrapper, so another program can read or write it without agreeing to
-anything first:
+anything first. It is a cache: the name of record lives in Svartal, where
+everybody with access to the workspace reads the same one, and that answer wins
+whenever the two differ.
 
 ```json
 {

@@ -30,7 +30,8 @@ Commands:
   add [pairing-url]  With a pairing URL, link that machine to your Svartal
                      account. Without one, show how to connect a new machine,
                      and hand it a token.
-  name [name] [env]  Name an environment, or list the names you have given.
+  name [name] [env]  Name an environment, or list the names in force. The name
+                     is recorded in Svartal, so every app reads it.
   sessions [machine] List agent sessions on a machine.
   shell <target>     Open a shell in a workspace you can reach.
   claude [target]    Open an interactive Claude terminal in a workspace.
@@ -65,6 +66,7 @@ Options:
                      with an OWNER column (machines, envs). Without it a
                      listing is yours alone.
   --no-browser       Print the sign-in URL instead of opening a browser (login).
+  --machine <name>   Name the machine rather than a workspace (name).
   --remove <name>    Forget a short name (name).
   --terminal-id <id> Open — or close — a second, separate terminal on the same
                      workspace (shell, claude, close).
@@ -156,7 +158,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let accepted: &[&str] = match command {
         "login" => &["--no-browser"],
         "shell" | "claude" | "close" => &["--terminal-id"],
-        "name" => &["--remove"],
+        "name" => &["--machine", "--remove"],
         "ssh-setup" => &["--print", "--reset-hosts", "--user"],
         "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
         "host" => &["--image", "--instance", "--name", "--purge"],
@@ -181,6 +183,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut no_browser = false;
     let mut terminal_id: Option<String> = None;
     let mut removed_name: Option<String> = None;
+    let mut name_machine = false;
     let mut origin: Option<String> = None;
     let mut publish_only = false;
     let mut print_token = false;
@@ -238,6 +241,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
                         .clone(),
                 );
             }
+            "--machine" => name_machine = true,
             "--publish-only" => publish_only = true,
             "--print" => print_block = true,
             "--reset-hosts" => reset_hosts = true,
@@ -316,7 +320,14 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "name" => match (removed_name.as_deref(), positional.first().copied(), positional.get(1).copied()) {
             (Some(name), _, _) => commands::remove_name(&context, &mut stdout, name),
             (None, None, _) => commands::list_names(&context, &mut stdout),
-            (None, Some(name), Some(target)) => commands::name(&context, &mut stdout, name, target),
+            (None, Some(name), Some(target)) => {
+                commands::name(&context, &mut stdout, name, target, name_machine)
+            }
+            (None, Some(name), None) if name_machine => {
+                return Err(format!(
+                    "`sv name --machine {name}` needs the machine to name. Run `sv machines` to see them, then `sv name --machine {name} <machine>`."
+                ));
+            }
             (None, Some(name), None) => {
                 return Err(format!(
                     "`sv name {name}` needs the workspace to name. Run `sv envs` to see them, then `sv name {name} <workspace>`."

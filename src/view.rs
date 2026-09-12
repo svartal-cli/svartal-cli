@@ -15,9 +15,14 @@ use crate::api::{LinkRecord, Machine};
 pub struct WorkspaceRow {
     pub machine_id: String,
     pub machine_name: String,
+    /// The word the machine's owner gave it in Svartal, when there is one.
+    pub machine_short_name: Option<String>,
     pub machine_presence: String,
     pub environment_id: String,
     pub label: String,
+    /// The word the machine's owner gave this workspace in Svartal. `label` is
+    /// generated, so this is the only one of the two anybody chose.
+    pub short_name: Option<String>,
     pub kind: String,
     pub lifecycle_state: String,
     /// The username whose personal workspace this is, when Svartal said so.
@@ -73,7 +78,18 @@ impl MachinesView {
 
 /// Said once, everywhere the CLI would otherwise imply it knows more than it
 /// does.
-pub const MACHINE_STATE_NOTE: &str = "REACHABLE is your relay link, not a live check: relinking means Svartal is restoring your link, so run `sv host up` on that machine; unclaimed means nobody owns that workspace. MACHINE is the box's last heartbeat: unknown means it has never reported.";
+pub const MACHINE_STATE_NOTE: &str = "REACHABLE is your relay link, not a live check: relinking means Svartal is restoring your link, so run `sv host up` on that machine; unclaimed means nobody owns that workspace. HEARTBEAT is the box's last heartbeat: unknown means it has never reported.";
+
+/// A machine as one cell: the word its owner chose, with the name the host
+/// derived from its own hostname kept in brackets so nothing a person already
+/// recognised disappears.
+pub fn machine_cell(name: &str, short_name: Option<&str>) -> String {
+    match short_name.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(short) if short != name => format!("{short} ({name})"),
+        Some(short) => short.to_string(),
+        None => name.to_string(),
+    }
+}
 
 pub const SESSIONS_NOT_EXPOSED_NOTE: &str = "Live agent sessions are not readable with a terminal sign-in yet. They live on the workspace itself and need a connected session, which this CLI cannot open yet. See NOTES.md in the svartal-cli package.";
 
@@ -123,9 +139,11 @@ pub fn build_machines_view(
             rows.push(WorkspaceRow {
                 machine_id: machine.id.clone(),
                 machine_name: machine.name.clone(),
+                machine_short_name: machine.short_name.clone(),
                 machine_presence: present(Some(machine.presence.as_str()), "unknown"),
                 environment_id: workspace.environment_id.clone(),
                 label: present(workspace.label.as_deref(), &workspace.environment_id),
+                short_name: workspace.short_name.clone(),
                 kind: present(workspace.kind.as_deref(), "-"),
                 lifecycle_state: present(workspace.lifecycle_state.as_deref(), "-"),
                 owner: workspace.owner.clone(),
@@ -227,7 +245,7 @@ pub fn format_machines_view(view: &MachinesView, show_owner: bool) -> String {
         if show_owner {
             headers.push("OWNER");
         }
-        headers.extend(["STATE", "REACHABLE", "MACHINE"]);
+        headers.extend(["STATE", "REACHABLE", "HEARTBEAT"]);
         sections.push(render_table(
             &headers,
             &view
@@ -235,8 +253,8 @@ pub fn format_machines_view(view: &MachinesView, show_owner: bool) -> String {
                 .iter()
                 .map(|row| {
                     let mut cells = vec![
-                        row.machine_name.clone(),
-                        row.label.clone(),
+                        machine_cell(&row.machine_name, row.machine_short_name.as_deref()),
+                        row.short_name.clone().unwrap_or_else(|| row.label.clone()),
                         row.environment_id.clone(),
                         row.kind.clone(),
                     ];
@@ -307,10 +325,16 @@ pub fn build_env_rows(
         .rows
         .iter()
         .map(|row| EnvRow {
-            shortname: shortnames.shortname_of(&row.environment_id).map(str::to_string),
+            // Svartal's answer first: it is what everyone else reading this
+            // workspace sees. A local name is a leftover from before names
+            // were stored, and still resolves.
+            shortname: row
+                .short_name
+                .clone()
+                .or_else(|| shortnames.shortname_of(&row.environment_id).map(str::to_string)),
             label: row.label.clone(),
             environment_id: row.environment_id.clone(),
-            machine_name: Some(row.machine_name.clone()),
+            machine_name: Some(machine_cell(&row.machine_name, row.machine_short_name.as_deref())),
             kind: row.kind.clone(),
             lifecycle_state: row.lifecycle_state.clone(),
             owner: row.owner.clone(),
@@ -379,7 +403,7 @@ pub fn format_envs_view(rows: &[EnvRow], show_owner: bool) -> String {
     if show_owner {
         headers.push("OWNER");
     }
-    headers.extend(["STATE", "REACHABLE", "MACHINE"]);
+    headers.extend(["STATE", "REACHABLE", "HEARTBEAT"]);
     render_table(
         &headers,
         &rows
@@ -421,8 +445,8 @@ pub fn format_sessions_view(view: &MachinesView) -> String {
             .iter()
             .map(|row| {
                 vec![
-                    row.machine_name.clone(),
-                    row.label.clone(),
+                    machine_cell(&row.machine_name, row.machine_short_name.as_deref()),
+                    row.short_name.clone().unwrap_or_else(|| row.label.clone()),
                     row.environment_id.clone(),
                     row.linked_at.clone().unwrap_or_else(|| "-".to_string()),
                 ]
@@ -484,8 +508,12 @@ pub fn filter_view_by_machine(view: &MachinesView, machine: &str) -> MachinesVie
             .iter()
             .filter(|row| {
                 row.machine_name.to_lowercase() == needle
+                    || row.machine_short_name.as_deref().map(str::to_lowercase).as_deref()
+                        == Some(needle.as_str())
                     || row.machine_id.to_lowercase() == needle
                     || row.environment_id.to_lowercase() == needle
+                    || row.short_name.as_deref().map(str::to_lowercase).as_deref()
+                        == Some(needle.as_str())
             })
             .cloned()
             .collect(),

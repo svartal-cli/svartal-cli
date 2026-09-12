@@ -52,6 +52,11 @@ pub struct Workspace {
     pub id: String,
     pub environment_id: String,
     pub label: Option<String>,
+    /// The word this workspace's owner gave it in Svartal. `label` is
+    /// generated -- "Personal workspace" on every box -- so it is not a name
+    /// anyone chose. Absent from an older Svartal, and absent when nobody has
+    /// named this workspace.
+    pub short_name: Option<String>,
     pub kind: Option<String>,
     pub lifecycle_state: Option<String>,
     /// The username whose personal workspace this is. `None` for a shared
@@ -77,6 +82,9 @@ pub struct Workspace {
 pub struct Machine {
     pub id: String,
     pub name: String,
+    /// The word this machine's owner gave it in Svartal, as opposed to `name`,
+    /// which the host seeded from its own hostname.
+    pub short_name: Option<String>,
     pub origin: Option<String>,
     pub lifecycle_state: Option<String>,
     /// `"online"`, `"offline"`, or `"unknown"` when the box never checked in.
@@ -157,6 +165,112 @@ pub fn list_machines(
         action: action.to_string(),
         detail: error.to_string(),
     })
+}
+
+/// Records (or clears) the word a machine is read by.
+///
+/// `PATCH /api/v1/client/machines/:id/short-name`. A sub-resource rather than
+/// a general machine PATCH: this credential is a sign-in, not an operator
+/// token, and the only thing it may write about a machine is its name.
+pub fn set_machine_short_name(
+    http: &dyn HttpTransport,
+    api_base_url: &str,
+    access_token: &str,
+    machine_id: &str,
+    short_name: Option<&str>,
+) -> Result<(), ApiError> {
+    send_short_name(
+        http,
+        &format!("{api_base_url}/api/v1/client/machines/{machine_id}/short-name"),
+        access_token,
+        "name this machine",
+        short_name,
+    )
+}
+
+/// Records (or clears) the word a workspace is read by.
+///
+/// The path carries the `environment_id` the box chose, which is the id this
+/// CLI, `sv envs` and the relay all already speak.
+pub fn set_workspace_short_name(
+    http: &dyn HttpTransport,
+    api_base_url: &str,
+    access_token: &str,
+    machine_id: &str,
+    environment_id: &str,
+    short_name: Option<&str>,
+) -> Result<(), ApiError> {
+    send_short_name(
+        http,
+        &format!(
+            "{api_base_url}/api/v1/client/machines/{machine_id}/environments/{environment_id}/short-name"
+        ),
+        access_token,
+        "name this workspace",
+        short_name,
+    )
+}
+
+fn send_short_name(
+    http: &dyn HttpTransport,
+    url: &str,
+    access_token: &str,
+    action: &str,
+    short_name: Option<&str>,
+) -> Result<(), ApiError> {
+    let body = serde_json::json!({
+        "short_name": match short_name {
+            Some(value) => Value::String(value.to_string()),
+            // Explicitly null, not absent: absent is a call with nothing in it,
+            // null is "forget the name I gave this".
+            None => Value::Null,
+        }
+    });
+    let response = http
+        .send(
+            Request::patch(url)
+                .json(body)
+                .header("authorization", &format!("Bearer {access_token}"))
+                .header("accept", "application/json"),
+        )
+        .map_err(|error| ApiError::Failed { action: action.to_string(), detail: error.to_string() })?;
+    if response.status == 401 || response.status == 403 {
+        return Err(ApiError::Unauthorized { action: action.to_string() });
+    }
+    if !response.is_success() {
+        // The field-level sentence first ("is already the name of another
+        // machine you own"), because for a name that sentence is the whole
+        // point; the generic detail otherwise.
+        return Err(ApiError::Refused {
+            action: action.to_string(),
+            status: response.status,
+            detail: refusal(&response).or_else(|| error_detail(&response.body)),
+        });
+    }
+    Ok(())
+}
+
+/// The sentence Svartal refused with, where it sent one.
+///
+/// A name is refused for reasons a person can act on -- the shape is wrong,
+/// the word is taken, it is already a workspace id -- and "HTTP 422" is not
+/// one of them.
+fn refusal(response: &crate::http::Response) -> Option<String> {
+    let body = response.json().ok()?;
+    for key in ["short_name", "shortName"] {
+        if let Some(message) = body
+            .get("errors")
+            .and_then(|errors| errors.get(key))
+            .and_then(|messages| messages.get(0))
+            .and_then(Value::as_str)
+        {
+            return Some(format!("That name {message}."));
+        }
+    }
+    body.get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// The environments this identity is linked to on the relay.
