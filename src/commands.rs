@@ -662,11 +662,19 @@ where
 /// `ssh` hands that word straight back to `sv ssh-proxy` with nothing else, so
 /// the display name the person typed ("My Box", a label the workspace can
 /// rename underneath them) would not survive the trip.
+///
+/// The block also answers to `svartal-<workspace-id>` when that is not already
+/// the alias, because a link made somewhere with no view of this machine's
+/// short names can only name the id.
+///
+/// `user` is the account to log in as. `sshproxy::SSH_USER` on a managed
+/// workspace, and whatever `--user` said on a machine with its own accounts.
 pub fn ssh_setup(
     context: &Context<'_>,
     out: &mut dyn Write,
     environment: &crate::config::Environment,
     target: &str,
+    user: &str,
     print: bool,
     reset_hosts: bool,
 ) -> Result<(), CliError> {
@@ -682,10 +690,24 @@ pub fn ssh_setup(
         .map(str::to_string)
         .unwrap_or_else(|| resolved.environment_id.clone());
 
+    // The block answers to the workspace id as well, whenever the short name
+    // is not already it. A deep link made elsewhere — the web app — knows the
+    // id and not the names this machine keeps, so `ssh svartal-<id>` has to
+    // land on the same host.
+    let primary = sshproxy::host_alias(&name);
+    let id_alias = sshproxy::host_alias(&resolved.environment_id);
+    let extra_aliases = if id_alias == primary {
+        Vec::new()
+    } else {
+        vec![id_alias]
+    };
+
     let outcome = sshproxy::run_ssh_setup(&sshproxy::SetupInput {
         state_directory: &context.config.state_directory,
         target: &name,
+        extra_aliases: &extra_aliases,
         binary: &sshproxy::invoked_binary_path(),
+        user,
         ssh_config_path: &ssh_config_path,
         print,
         reset_hosts,

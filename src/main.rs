@@ -83,6 +83,8 @@ Options:
                      (ssh-setup).
   --reset-hosts      Forget the workspace host key recorded for this host
                      first (ssh-setup).
+  --user <account>   The account to log in as (ssh-setup). Default svartal; a
+                     personal machine uses its own user.
   --project <p>      The Svartal project, as owner/slug or id (issue).
   --kind <kind>      issue, bug, chore, investigation, idea or plan (issue
                      post).
@@ -151,7 +153,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "login" => &["--no-browser"],
         "shell" | "claude" | "close" => &["--terminal-id"],
         "name" => &["--remove"],
-        "ssh-setup" => &["--print", "--reset-hosts"],
+        "ssh-setup" => &["--print", "--reset-hosts", "--user"],
         "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
         "host" => &["--image", "--instance", "--name", "--purge"],
         "whoami" | "machines" | "envs" | "sessions" => &["--json"],
@@ -179,6 +181,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut token_file: Option<String> = None;
     let mut print_block = false;
     let mut reset_hosts = false;
+    let mut ssh_user: Option<String> = None;
     let mut host_image: Option<String> = None;
     let mut host_name: Option<String> = None;
     let mut host_instance: Option<String> = None;
@@ -231,6 +234,13 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             "--publish-only" => publish_only = true,
             "--print" => print_block = true,
             "--reset-hosts" => reset_hosts = true,
+            "--user" => {
+                ssh_user = Some(
+                    rest.next()
+                        .ok_or_else(|| "--user needs the account to log in as.".to_string())?
+                        .clone(),
+                );
+            }
             "--print-token" => print_token = true,
             "--purge" => purge = true,
             "--name" => {
@@ -357,7 +367,16 @@ fn run(arguments: &[String]) -> Result<u8, String> {
                         .to_string(),
                 );
             };
-            commands::ssh_setup(&context, &mut stdout, &environment, target, print_block, reset_hosts)
+            let user = ssh_user.as_deref().unwrap_or(svartal::sshproxy::SSH_USER);
+            commands::ssh_setup(
+                &context,
+                &mut stdout,
+                &environment,
+                target,
+                user,
+                print_block,
+                reset_hosts,
+            )
         }
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
         "issue" => {

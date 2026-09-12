@@ -1227,13 +1227,23 @@ pub fn block_markers(alias: &str) -> (String, String) {
 }
 
 pub struct ConfigBlockInput<'a> {
-    /// `svartal-<name>`, the host a person types after `ssh`.
+    /// `svartal-<name>`, the host a person types after `ssh`. The primary one:
+    /// the markers and `known_hosts` are keyed by it.
     pub alias: &'a str,
+    /// Further hosts that reach the same workspace, written on the same `Host`
+    /// line. The workspace id alias goes here when a short name was recorded,
+    /// because a link made elsewhere — the web app, say — only knows the id.
+    /// An extra alias brings a `HostKeyAlias`, so every one of them checks the
+    /// key recorded under the primary alias.
+    pub extra_aliases: &'a [String],
     /// What `ssh-proxy` is given. A word that resolves to one workspace on its
     /// own: the short name recorded for it, or its workspace id.
     pub target: &'a str,
     /// The `sv` this command was invoked as.
     pub binary: &'a str,
+    /// The account to log in as. `SSH_USER` on a managed workspace; a personal
+    /// machine has a login account of its own.
+    pub user: &'a str,
     pub identity_file: &'a str,
     pub known_hosts_file: &'a str,
 }
@@ -1245,10 +1255,19 @@ pub struct ConfigBlockInput<'a> {
 /// `IdentityFile` that points at the wrong one is a refusal nobody can read.
 pub fn ssh_config_block(input: &ConfigBlockInput<'_>) -> String {
     let (start, end) = block_markers(input.alias);
-    [
-        start,
-        format!("Host {}", input.alias),
-        format!("  User {SSH_USER}"),
+    let mut lines = vec![start];
+    let hosts = std::iter::once(input.alias)
+        .chain(input.extra_aliases.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    lines.push(format!("Host {hosts}"));
+    // Only when there is a second host to reconcile. With one alias the block
+    // is the reference text, and `ssh` keys the host by that name anyway.
+    if !input.extra_aliases.is_empty() {
+        lines.push(format!("  HostKeyAlias {}", input.alias));
+    }
+    lines.extend([
+        format!("  User {}", input.user),
         format!(
             "  ProxyCommand {} ssh-proxy {}",
             quote_argument(input.binary),
@@ -1263,8 +1282,8 @@ pub fn ssh_config_block(input: &ConfigBlockInput<'_>) -> String {
         "  StrictHostKeyChecking accept-new".to_string(),
         "  ForwardAgent no".to_string(),
         end,
-    ]
-    .join("\n")
+    ]);
+    lines.join("\n")
 }
 
 /// ssh's config parser reads a quoted argument as one token.
@@ -1426,8 +1445,14 @@ pub struct SetupInput<'a> {
     /// up. The alias is built from the same word so that `known_hosts` is keyed
     /// by the host `ssh` is actually looking up.
     pub target: &'a str,
+    /// Further hosts the block should answer to, beyond `svartal-<target>`.
+    /// The workspace id alias, when a short name was recorded: a link made
+    /// somewhere that does not know the person's local names still lands here.
+    pub extra_aliases: &'a [String],
     /// The `sv` this command was invoked as, for the `ProxyCommand` line.
     pub binary: &'a str,
+    /// The account to log in as, `SSH_USER` unless the person named another.
+    pub user: &'a str,
     pub ssh_config_path: &'a Path,
     /// Print the block instead of writing it.
     pub print: bool,
@@ -1438,6 +1463,8 @@ pub struct SetupInput<'a> {
 #[derive(Debug, Clone)]
 pub struct SetupOutcome {
     pub alias: String,
+    /// The other hosts the block answers to, so the sentence can name them.
+    pub extra_aliases: Vec<String>,
     /// The word written into the `ProxyCommand` line, so the sentence this
     /// command prints can name what it wrote.
     pub target: String,
@@ -1460,10 +1487,12 @@ pub fn run_ssh_setup(input: &SetupInput<'_>) -> Result<SetupOutcome, SshError> {
     let hosts_path = known_hosts_path(input.state_directory);
     let block = ssh_config_block(&ConfigBlockInput {
         alias: &alias,
+        extra_aliases: input.extra_aliases,
         // Verbatim, never `alias_token`: the word has to still resolve when
         // `ssh` hands it back, and a sanitized one need not.
         target: input.target,
         binary: input.binary,
+        user: input.user,
         identity_file: &key.private_key_path.display().to_string(),
         known_hosts_file: &hosts_path.display().to_string(),
     });
@@ -1482,6 +1511,7 @@ pub fn run_ssh_setup(input: &SetupInput<'_>) -> Result<SetupOutcome, SshError> {
     if input.print {
         return Ok(SetupOutcome {
             alias,
+            extra_aliases: input.extra_aliases.to_vec(),
             target: input.target.to_string(),
             block,
             key,
@@ -1494,6 +1524,7 @@ pub fn run_ssh_setup(input: &SetupInput<'_>) -> Result<SetupOutcome, SshError> {
     let config = apply_ssh_config_block(input.ssh_config_path, &alias, &block)?;
     Ok(SetupOutcome {
         alias,
+        extra_aliases: input.extra_aliases.to_vec(),
         target: input.target.to_string(),
         block,
         key,
@@ -1524,24 +1555,33 @@ pub fn describe_ssh_setup(outcome: &SetupOutcome) -> Vec<String> {
     // is the part a person cannot see from the alias: `ssh svartal-web` is a
     // host, and `web` is the word `sv ssh-proxy` was given to find it with.
     let target = &outcome.target;
+    // The second host is named too. It is the one a link from elsewhere uses,
+    // and nothing else in the sentence would tell the person it exists.
+    let alternatives = outcome
+        .extra_aliases
+        .iter()
+        .map(|other| format!("`ssh {other}`"))
+        .collect::<Vec<_>>();
+    let reaches = if alternatives.is_empty() {
+        format!("`ssh {alias}` reaches {target}.")
+    } else {
+        format!(
+            "`ssh {alias}` (or {}) reaches {target}.",
+            alternatives.join(", ")
+        )
+    };
     match outcome.config {
         Some(ConfigChange::Created) => {
-            lines.push(format!("Wrote {path}. `ssh {alias}` reaches {target}."));
+            lines.push(format!("Wrote {path}. {reaches}"));
         }
         Some(ConfigChange::Added) => {
-            lines.push(format!(
-                "Added {alias} to {path}. `ssh {alias}` reaches {target}."
-            ));
+            lines.push(format!("Added {alias} to {path}. {reaches}"));
         }
         Some(ConfigChange::Replaced) => {
-            lines.push(format!(
-                "Updated {alias} in {path}. `ssh {alias}` reaches {target}."
-            ));
+            lines.push(format!("Updated {alias} in {path}. {reaches}"));
         }
         Some(ConfigChange::Unchanged) => {
-            lines.push(format!(
-                "{alias} is already set up in {path}. `ssh {alias}` reaches {target}."
-            ));
+            lines.push(format!("{alias} is already set up in {path}. {reaches}"));
         }
         None => {}
     }
