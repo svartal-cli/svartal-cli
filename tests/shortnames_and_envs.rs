@@ -157,7 +157,7 @@ fn view() -> svartal::view::MachinesView {
         }))
         .unwrap(),
     ];
-    build_machines_view(&machines, &links)
+    build_machines_view(&machines, &links, Some("person"))
 }
 
 fn resolved(view: &svartal::view::MachinesView, names: &Shortnames, argument: &str) -> String {
@@ -241,7 +241,7 @@ fn envs_lists_every_workspace_with_its_name_including_ones_on_no_visible_machine
     );
     assert_eq!(rows[2].machine_name, None);
 
-    let table = format_envs_view(&rows);
+    let table = format_envs_view(&rows, false);
     let lines: Vec<&str> = table.lines().collect();
     assert!(lines[0].starts_with("SHORTNAME"));
     assert!(lines[1].starts_with("web"));
@@ -250,7 +250,7 @@ fn envs_lists_every_workspace_with_its_name_including_ones_on_no_visible_machine
     assert!(lines[2].starts_with("-"));
     assert!(lines[2].contains("not linked"));
     assert!(lines[3].contains("env-loose"));
-    assert_eq!(format_envs_view(&[]), svartal::view::NO_ENVIRONMENTS);
+    assert_eq!(format_envs_view(&[], false), svartal::view::NO_ENVIRONMENTS);
 }
 
 // -- the commands ----------------------------------------------------------
@@ -265,8 +265,9 @@ const MACHINES_BODY: &str = r#"{
       "presence": "online",
       "lastSeenAt": "2026-08-13T09:00:00Z",
       "environments": [
-        { "id": "row-1", "environmentId": "env-primary", "label": "Primary", "kind": "personal", "lifecycleState": "active" },
-        { "id": "row-2", "environmentId": "env-second", "label": "Second", "kind": "workspace", "lifecycleState": "active" }
+        { "id": "row-1", "environmentId": "env-primary", "label": "Primary", "kind": "personal", "owner": "person", "lifecycleState": "active" },
+        { "id": "row-2", "environmentId": "env-second", "label": "Second", "kind": "workspace", "lifecycleState": "active" },
+        { "id": "row-3", "environmentId": "env-theirs", "label": "Theirs", "kind": "personal", "owner": "other", "lifecycleState": "active" }
       ]
     }
   ]
@@ -412,7 +413,7 @@ fn envs_prints_the_short_name_column_and_the_same_note_machines_prints() {
     let harness = Harness::new("envs");
     harness.run(|context, out| commands::name(context, out, "web", "Primary")).0.unwrap();
 
-    let (outcome, output) = harness.run(|context, out| commands::envs(context, out, false));
+    let (outcome, output) = harness.run(|context, out| commands::envs(context, out, false, false));
     outcome.unwrap();
     let lines: Vec<&str> = output.lines().collect();
     assert!(lines[0].starts_with("SHORTNAME"));
@@ -420,13 +421,57 @@ fn envs_prints_the_short_name_column_and_the_same_note_machines_prints() {
     assert!(lines[2].starts_with("-") && lines[2].contains("env-second"));
     assert_eq!(lines.last().copied().unwrap(), svartal::view::MACHINE_STATE_NOTE);
 
-    let (outcome, output) = harness.run(|context, out| commands::envs(context, out, true));
+    let (outcome, output) = harness.run(|context, out| commands::envs(context, out, true, false));
     outcome.unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     let rows = parsed["environments"].as_array().unwrap();
     assert_eq!(rows[0]["shortname"], json!("web"));
     assert_eq!(rows[0]["environmentId"], json!("env-primary"));
     assert_eq!(rows[1]["shortname"], Value::Null);
+}
+
+#[test]
+fn envs_is_your_workspaces_and_all_names_who_the_others_belong_to() {
+    let harness = Harness::new("envs-owner");
+
+    let (outcome, output) = harness.run(|context, out| commands::envs(context, out, false, false));
+    outcome.unwrap();
+    assert!(output.contains("env-primary") && output.contains("env-second"));
+    assert!(!output.contains("env-theirs"), "the second account's workspace is not yours");
+    assert!(!output.contains("OWNER"));
+
+    let (outcome, output) = harness.run(|context, out| commands::envs(context, out, false, true));
+    outcome.unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    // SHORTNAME, WORKSPACE, WORKSPACE ID, MACHINE, KIND, OWNER, … — the
+    // header's own "WORKSPACE ID" is two words, so only the rows are counted.
+    let owner_of = |line: &str| line.split_whitespace().nth(5).unwrap().to_string();
+    assert!(lines[0].contains("OWNER"));
+    assert!(lines[1].contains("env-primary"));
+    assert_eq!(owner_of(lines[1]), "person");
+    // A workspace Svartal named no owner for keeps a dash there.
+    assert!(lines[2].contains("env-second"));
+    assert_eq!(owner_of(lines[2]), "-");
+    assert!(lines[3].contains("env-theirs"));
+    assert_eq!(owner_of(lines[3]), "other");
+
+    // `--json` is every row, with the owner, whatever `--all` says.
+    let (outcome, output) = harness.run(|context, out| commands::envs(context, out, true, false));
+    outcome.unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(
+        parsed["environments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| (row["environmentId"].clone(), row["owner"].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (json!("env-primary"), json!("person")),
+            (json!("env-second"), Value::Null),
+            (json!("env-theirs"), json!("other")),
+        ]
+    );
 }
 
 #[test]

@@ -45,7 +45,7 @@ fn view(presence: &str) -> MachinesView {
         }))
         .unwrap(),
     ];
-    build_machines_view(&machines, &links)
+    build_machines_view(&machines, &links, Some("person"))
 }
 
 fn rows() -> Vec<PickerRow> {

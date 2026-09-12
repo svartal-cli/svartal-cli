@@ -83,7 +83,7 @@ fn machines_view(second_workspace: bool, presence: &str) -> svartal::view::Machi
         }))
         .unwrap(),
     ];
-    build_machines_view(&machines, &links)
+    build_machines_view(&machines, &links, Some("person"))
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn a_name_nothing_answers_to_lists_what_is_reachable() {
     assert!(message.contains("These are the ones you can reach"));
     assert!(message.contains("env-primary"));
 
-    let empty = build_machines_view(&[], &[]);
+    let empty = build_machines_view(&[], &[], Some("person"));
     let error = select_shell_target(&empty, &no_names(), "nowhere").unwrap_err();
     assert!(error.to_string().contains("You cannot reach any workspace yet"));
 }
@@ -192,7 +192,7 @@ fn one_reachable_workspace_needs_no_argument_and_two_do() {
     let two = machines_view(true, "unknown");
     assert_eq!(select_target(&two, &no_names(), None).unwrap().environment_id, "env-primary");
 
-    let none = svartal::view::build_machines_view(&[], &[]);
+    let none = svartal::view::build_machines_view(&[], &[], Some("person"));
     let error = select_target(&none, &no_names(), None).unwrap_err();
     assert!(error.to_string().contains("cannot reach any workspace yet"));
 }
@@ -211,6 +211,7 @@ fn target_of(fixture: &Value) -> ShellTarget {
         machine_name: Some(fixture["target"]["machineName"].as_str().unwrap().to_string()),
         linked: true,
         machine_presence: Some("unknown".to_string()),
+        belongs_to_another: false,
     }
 }
 

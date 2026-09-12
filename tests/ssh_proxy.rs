@@ -343,6 +343,7 @@ fn the_connect_chain_is_the_reference_chain() {
             .as_str()
             .map(str::to_string),
         linked: true,
+        belongs_to_another: false,
         machine_presence: Some("unknown".to_string()),
     };
 
@@ -1460,7 +1461,7 @@ fn spaced_view() -> svartal::view::MachinesView {
         serde_json::from_value(spaced_machines()["data"].clone()).expect("machines");
     let links: Vec<svartal::api::LinkRecord> =
         serde_json::from_value(spaced_links()["environments"].clone()).expect("links");
-    svartal::view::build_machines_view(&machines, &links)
+    svartal::view::build_machines_view(&machines, &links, Some("person"))
 }
 
 /// Run `sv ssh-setup <target>` against that machine, in a throwaway home, and
@@ -1750,6 +1751,7 @@ fn connect_with_endpoint(http_base: &str, ws_base: &str) -> String {
         machine_name: None,
         linked: true,
         machine_presence: Some("unknown".to_string()),
+        belongs_to_another: false,
     };
     sshproxy::connect_bridge(
         &http,

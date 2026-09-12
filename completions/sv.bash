@@ -26,7 +26,8 @@ _sv() {
     local flags=""
     case $command in
       login) flags="--no-browser" ;;
-      whoami|machines|envs|sessions) flags="--json" ;;
+      machines|envs) flags="--json --all" ;;
+      whoami|sessions) flags="--json" ;;
       add) flags="--json --origin --publish-only --print-token --token-file" ;;
       name) flags="--remove" ;;
       shell|claude|close) flags="--terminal-id" ;;

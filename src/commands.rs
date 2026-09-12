@@ -208,7 +208,8 @@ fn load_session_and_view(
     });
     let machines: Vec<Machine> = machines.map_err(CliError::of)?;
     let links: Vec<LinkRecord> = links.map_err(CliError::of)?;
-    Ok((session, view::build_machines_view(&machines, &links)))
+    let viewer = session.user.preferred_username.clone();
+    Ok((session, view::build_machines_view(&machines, &links, viewer.as_deref())))
 }
 
 /// The stored short names, or none.
@@ -220,14 +221,27 @@ fn stored_shortnames(context: &Context<'_>) -> Shortnames {
     shortnames::read_shortnames(&context.config.state_directory).unwrap_or_default()
 }
 
-pub fn machines(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Result<(), CliError> {
+/// `sv machines`.
+///
+/// Somebody else's personal workspace on a machine you own is left out unless
+/// `--all` asks for it, and only then is there an `OWNER` column to explain
+/// what the extra rows are. `--json` is the scripting surface and always
+/// carries every row, each with its `owner`: a program filtering a listing can
+/// do it itself, and a program missing rows cannot.
+pub fn machines(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    json: bool,
+    all: bool,
+) -> Result<(), CliError> {
     let loaded = load_view(context)?;
     if json {
         writeln!(out, "{}", view::format_machines_json(&loaded)).ok();
         return Ok(());
     }
-    writeln!(out, "{}", view::format_machines_view(&loaded)).ok();
-    if !loaded.rows.is_empty() {
+    let shown = if all { loaded } else { loaded.yours() };
+    writeln!(out, "{}", view::format_machines_view(&shown, all)).ok();
+    if !shown.rows.is_empty() {
         writeln!(out).ok();
         writeln!(out, "{}", view::MACHINE_STATE_NOTE).ok();
     }
@@ -239,14 +253,22 @@ pub fn machines(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Resul
 /// The same two listings `sv machines` joins, with the workspace as the subject
 /// and the short name in front of it. `sv machines` is unchanged: it is the
 /// command the npm CLI also has, and the two are meant to print the same thing.
-pub fn envs(context: &Context<'_>, out: &mut dyn Write, json: bool) -> Result<(), CliError> {
+pub fn envs(
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    json: bool,
+    all: bool,
+) -> Result<(), CliError> {
     let view = load_view(context)?;
     let rows = view::build_env_rows(&view, &stored_shortnames(context));
     if json {
         writeln!(out, "{}", view::format_envs_json(&rows)).ok();
         return Ok(());
     }
-    writeln!(out, "{}", view::format_envs_view(&rows)).ok();
+    // `--all` and its `OWNER` column go together, for the reason `machines`
+    // gives.
+    let rows = if all { rows } else { view::own_env_rows(&rows) };
+    writeln!(out, "{}", view::format_envs_view(&rows, all)).ok();
     if !rows.is_empty() {
         writeln!(out).ok();
         writeln!(out, "{}", view::MACHINE_STATE_NOTE).ok();
@@ -318,7 +340,7 @@ pub fn name(
         crate::target::Resolution::Missing(_) => {
             return Err(CliError(format!(
                 "No workspace called {target}. Run `sv envs` to see them:\n\n{}",
-                view::format_envs_view(&view::build_env_rows(&view, &stored))
+                view::format_envs_view(&view::own_env_rows(&view::build_env_rows(&view, &stored)), false)
             )));
         }
     };
