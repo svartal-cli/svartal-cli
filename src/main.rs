@@ -59,7 +59,11 @@ A target is a short name, a workspace id, a workspace name, or a machine name.
 
 Options:
   --json             Emit JSON instead of a table (whoami, machines, envs,
-                     sessions, add).
+                     sessions, add). The machines and envs listings then carry
+                     every workspace, other people's included, with its owner.
+  --all              Also list personal workspaces belonging to somebody else,
+                     with an OWNER column (machines, envs). Without it a
+                     listing is yours alone.
   --no-browser       Print the sign-in URL instead of opening a browser (login).
   --remove <name>    Forget a short name (name).
   --terminal-id <id> Open — or close — a second, separate terminal on the same
@@ -156,7 +160,8 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "ssh-setup" => &["--print", "--reset-hosts", "--user"],
         "add" => &["--json", "--origin", "--publish-only", "--print-token", "--token-file"],
         "host" => &["--image", "--instance", "--name", "--purge"],
-        "whoami" | "machines" | "envs" | "sessions" => &["--json"],
+        "machines" | "envs" => &["--json", "--all"],
+        "whoami" | "sessions" => &["--json"],
         "issue" => &[
             "--json",
             "--project",
@@ -172,6 +177,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         _ => &[],
     };
     let mut json = false;
+    let mut all = false;
     let mut no_browser = false;
     let mut terminal_id: Option<String> = None;
     let mut removed_name: Option<String> = None;
@@ -209,6 +215,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         }
         match argument.as_str() {
             "--json" => json = true,
+            "--all" => all = true,
             "--no-browser" => no_browser = true,
             "--terminal-id" => {
                 terminal_id = Some(
@@ -304,8 +311,8 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "login" => commands::login(&context, &mut stdout),
         "logout" => commands::logout(&context, &mut stdout),
         "whoami" => commands::whoami(&context, &mut stdout, json),
-        "machines" => commands::machines(&context, &mut stdout, json),
-        "envs" => commands::envs(&context, &mut stdout, json),
+        "machines" => commands::machines(&context, &mut stdout, json, all),
+        "envs" => commands::envs(&context, &mut stdout, json, all),
         "name" => match (removed_name.as_deref(), positional.first().copied(), positional.get(1).copied()) {
             (Some(name), _, _) => commands::remove_name(&context, &mut stdout, name),
             (None, None, _) => commands::list_names(&context, &mut stdout),

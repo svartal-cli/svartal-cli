@@ -41,8 +41,12 @@ _sv() {
     login)
       _arguments '--no-browser[print the sign-in URL instead of opening a browser]'
       ;;
-    whoami|machines|envs)
+    whoami)
       _arguments '--json[emit JSON instead of a table]'
+      ;;
+    machines|envs)
+      _arguments '--json[emit JSON instead of a table]' \
+        '--all[also list personal workspaces belonging to somebody else]'
       ;;
     sessions)
       _arguments '--json[emit JSON instead of a table]' '2:machine:_sv_shortnames'

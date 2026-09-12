@@ -38,8 +38,10 @@ pub struct PickerRow {
 /// `not linked`. Hiding them would leave a person looking for a workspace they
 /// can see in the web app at an empty list; showing it with its reason is the
 /// answer they need. Picking one prints the same refusal `sv shell` gives.
+/// Somebody else's personal workspace is not on this list at all: the list is
+/// what pressing enter opens, and that one would refuse.
 pub fn build_picker_rows(view: &MachinesView, shortnames: &Shortnames) -> Vec<PickerRow> {
-    view::build_env_rows(view, shortnames)
+    view::own_env_rows(&view::build_env_rows(view, shortnames))
         .into_iter()
         .map(|row| PickerRow {
             state: if !row.linked {

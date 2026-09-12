@@ -54,6 +54,12 @@ pub struct Workspace {
     pub label: Option<String>,
     pub kind: Option<String>,
     pub lifecycle_state: Option<String>,
+    /// The username whose personal workspace this is. `None` for a shared
+    /// workspace, and also for a server old enough not to send the field at
+    /// all — which is why it is defaulted rather than required: an answer that
+    /// does not say who owns a workspace must not stop the listing.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -29,6 +29,11 @@ pub struct ShellTarget {
     pub linked: bool,
     /// The machine's own heartbeat: `online`, `offline`, or `unknown`.
     pub machine_presence: Option<String>,
+    /// A personal workspace belonging to somebody else. It stays a candidate
+    /// for its own workspace id and for nothing else: an id is unambiguous and
+    /// a person who typed one meant it, while a machine name means "my
+    /// workspace on that machine".
+    pub belongs_to_another: bool,
 }
 
 #[derive(Debug)]
@@ -85,6 +90,7 @@ fn target_of_row(row: &WorkspaceRow) -> ShellTarget {
         machine_name: Some(row.machine_name.clone()),
         linked: row.linked,
         machine_presence: Some(row.machine_presence.clone()),
+        belongs_to_another: row.belongs_to_another,
     }
 }
 
@@ -98,6 +104,8 @@ pub fn shell_targets(view: &MachinesView) -> Vec<ShellTarget> {
             machine_name: None,
             linked: true,
             machine_presence: None,
+            // A link this identity holds is its own proof of whose it is.
+            belongs_to_another: false,
         });
     }
     targets
@@ -128,6 +136,13 @@ pub enum Resolution {
 /// A short name pointing at a workspace that is no longer in the view falls
 /// through to the ordinary matching rather than failing on its own, so a stale
 /// entry reads as "no workspace called web" with the usual list under it.
+///
+/// A second person's personal workspace on a machine you own is not a
+/// candidate for any of those words. `sv shell m3` means "my workspace on m3",
+/// so the machine name resolves to yours rather than asking you which of two
+/// you meant — and the one you would have had to name is one you cannot open.
+/// Its workspace id still resolves, because an id names one workspace and
+/// nothing else.
 pub fn resolve_shell_target(
     view: &MachinesView,
     shortnames: &Shortnames,
@@ -135,11 +150,13 @@ pub fn resolve_shell_target(
 ) -> Resolution {
     let needle = normalize(argument);
     let candidates = shell_targets(view);
-    let reachable = |candidates: &[ShellTarget]| -> Vec<ShellTarget> {
-        candidates.iter().filter(|target| target.linked).cloned().collect()
+    let yours: Vec<&ShellTarget> =
+        candidates.iter().filter(|target| !target.belongs_to_another).collect();
+    let reachable = || -> Vec<ShellTarget> {
+        yours.iter().filter(|target| target.linked).map(|target| (*target).clone()).collect()
     };
     if needle.is_empty() {
-        return Resolution::Missing(reachable(&candidates));
+        return Resolution::Missing(reachable());
     }
 
     let by_id: Vec<&ShellTarget> = candidates
@@ -153,24 +170,24 @@ pub fn resolve_shell_target(
     if let Some(environment_id) = shortnames.environment_of(&needle) {
         let named = normalize(environment_id);
         if let Some(target) =
-            candidates.iter().find(|target| normalize(&target.environment_id) == named)
+            yours.iter().find(|target| normalize(&target.environment_id) == named)
         {
-            return Resolution::Resolved(target.clone());
+            return Resolution::Resolved((*target).clone());
         }
     }
 
-    let matches: Vec<ShellTarget> = candidates
+    let matches: Vec<ShellTarget> = yours
         .iter()
         .filter(|target| {
             normalize(&target.environment_id) == needle
                 || normalize(&target.label) == needle
                 || target.machine_name.as_deref().map(normalize).as_deref() == Some(needle.as_str())
         })
-        .cloned()
+        .map(|target| (*target).clone())
         .collect();
     match matches.len() {
         1 => Resolution::Resolved(matches.into_iter().next().expect("one match")),
-        0 => Resolution::Missing(reachable(&candidates)),
+        0 => Resolution::Missing(reachable()),
         _ => Resolution::Ambiguous(matches),
     }
 }
@@ -205,8 +222,10 @@ pub fn select_target(
     match argument.map(str::trim).filter(|argument| !argument.is_empty()) {
         Some(argument) => select_shell_target(view, shortnames, argument),
         None => {
-            let reachable: Vec<ShellTarget> =
-                shell_targets(view).into_iter().filter(|target| target.linked).collect();
+            let reachable: Vec<ShellTarget> = shell_targets(view)
+                .into_iter()
+                .filter(|target| target.linked && !target.belongs_to_another)
+                .collect();
             match reachable.len() {
                 1 => select_shell_target(
                     view,
@@ -261,4 +280,112 @@ pub fn select_shell_target(
         return Err(TargetError::MachineOffline { label: target.label });
     }
     Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{Machine, Workspace};
+    use crate::view::build_machines_view;
+
+    /// One machine called `m3` with two personal workspaces on it: the
+    /// caller's, and a second person's. This is the laptop the rule was
+    /// written for.
+    fn two_personal_workspaces(other_owner: Option<&str>) -> MachinesView {
+        let workspace = |environment_id: &str, label: &str, owner: Option<&str>| Workspace {
+            id: format!("row-{environment_id}"),
+            environment_id: environment_id.to_string(),
+            label: Some(label.to_string()),
+            kind: Some("personal".to_string()),
+            lifecycle_state: Some("active".to_string()),
+            owner: owner.map(str::to_string),
+        };
+        let machines = vec![Machine {
+            id: "machine-1".to_string(),
+            name: "m3".to_string(),
+            origin: Some("donated".to_string()),
+            lifecycle_state: Some("open".to_string()),
+            presence: "online".to_string(),
+            last_seen_at: None,
+            environments: vec![
+                workspace("env-mine", "Marc", Some("marc")),
+                workspace("env-theirs", "Someone", other_owner),
+            ],
+        }];
+        build_machines_view(&machines, &[], Some("marc"))
+    }
+
+    fn resolve(view: &MachinesView, argument: &str) -> Resolution {
+        resolve_shell_target(view, &Shortnames::new(), argument)
+    }
+
+    #[test]
+    fn a_machine_name_means_your_own_workspace_on_that_machine() {
+        let view = two_personal_workspaces(Some("someone"));
+        let Resolution::Resolved(target) = resolve(&view, "m3") else {
+            panic!("m3 did not resolve to one workspace");
+        };
+        assert_eq!(target.environment_id, "env-mine");
+        // And so does the label of your own workspace, as it always did.
+        let Resolution::Resolved(target) = resolve(&view, "Marc") else {
+            panic!("Marc did not resolve");
+        };
+        assert_eq!(target.environment_id, "env-mine");
+    }
+
+    #[test]
+    fn the_other_persons_workspace_answers_to_its_workspace_id_and_nothing_else() {
+        let view = two_personal_workspaces(Some("someone"));
+        // An id names one workspace, so it still resolves; what happens next
+        // is the ordinary "you are not linked to it" refusal.
+        let Resolution::Resolved(target) = resolve(&view, "env-theirs") else {
+            panic!("the workspace id did not resolve");
+        };
+        assert_eq!(target.environment_id, "env-theirs");
+        assert!(target.belongs_to_another);
+        // Its label is not a word you can reach it by.
+        assert!(matches!(resolve(&view, "Someone"), Resolution::Missing(_)));
+    }
+
+    #[test]
+    fn a_workspace_with_no_owner_is_as_ambiguous_as_it_ever_was() {
+        // An older server sends no owner. Nothing is known to be somebody
+        // else's, so `m3` is two workspaces and the person is asked which.
+        let view = two_personal_workspaces(None);
+        let Resolution::Ambiguous(candidates) = resolve(&view, "m3") else {
+            panic!("m3 should still be ambiguous when no owner is known");
+        };
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn the_lists_a_refusal_prints_leave_other_peoples_workspaces_out() {
+        let mut view = two_personal_workspaces(Some("someone"));
+        // Linked to both, which is the only way a row reaches those lists.
+        for row in &mut view.rows {
+            row.linked = true;
+        }
+        let Resolution::Missing(reachable) = resolve(&view, "nowhere") else {
+            panic!("nowhere should not resolve");
+        };
+        assert_eq!(
+            reachable.iter().map(|target| target.environment_id.as_str()).collect::<Vec<_>>(),
+            vec!["env-mine"]
+        );
+        // With one workspace of your own left, no argument at all is not a
+        // question any more.
+        let target = select_target(&view, &Shortnames::new(), None).unwrap();
+        assert_eq!(target.environment_id, "env-mine");
+    }
+
+    #[test]
+    fn a_short_name_cannot_point_at_somebody_elses_workspace_either() {
+        let view = two_personal_workspaces(Some("someone"));
+        let mut names = Shortnames::new();
+        names.assign("theirs", "env-theirs").unwrap();
+        assert!(matches!(
+            resolve_shell_target(&view, &names, "theirs"),
+            Resolution::Missing(_)
+        ));
+    }
 }

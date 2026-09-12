@@ -28,8 +28,8 @@ the source comments (`ID-9`, `ID-16`, `ID-25`, …) are that document's.
 | `login`               | PKCE, loopback callback on `127.0.0.1:5733` (or `:5734`), tokens verified locally against JWKS |
 | `logout`              | clears the credential first, then revokes the refresh token            |
 | `whoami`              | `--json` too                                                           |
-| `machines`            | `--json` too                                                           |
-| `envs`                | The same join `machines` prints, workspace by workspace, with a SHORTNAME column; `--json` too |
+| `machines`            | Your workspaces; a personal workspace somebody else owns on a machine of yours is left out unless `--all` asks for it, and only then is there an OWNER column. `--json` too, and it always carries every row with its owner |
+| `envs`                | The same join `machines` prints, workspace by workspace, with a SHORTNAME column; the same `--all` and `--json` |
 | `sessions [machine]`  | partial: lists reachable workspaces; live agent sessions are not readable with a terminal sign-in yet |
 | `shell <target>`      | full connect chain, detached terminal namespace, raw-mode byte pump, reattach; `--terminal-id` too |
 | `claude [target]`     | the same client in the `svartal-claude:` namespace; the workspace runs Claude inside the machine broker's runner container. The target may be omitted when only one workspace is reachable |
@@ -92,6 +92,7 @@ sv claude web       # an interactive Claude terminal in that workspace
 sv close shell web  # end that shell instead of leaving it running
 sv ssh-setup web    # then: ssh svartal-web, or open it in a local editor
 sv machines
+sv machines --all   # including personal workspaces other people own on them
 sv sessions workbench
 sv logout
 ```

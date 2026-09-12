@@ -42,6 +42,18 @@ fn workspace(environment_id: &str, label: Value, kind: Value) -> Value {
     })
 }
 
+/// A workspace with an owner on it, which is what a current server sends.
+fn owned_workspace(environment_id: &str, kind: &str, owner: Value) -> Value {
+    json!({
+        "id": format!("row-{environment_id}"),
+        "environmentId": environment_id,
+        "label": environment_id,
+        "kind": kind,
+        "lifecycleState": "active",
+        "owner": owner,
+    })
+}
+
 fn link(environment_id: &str, label: &str) -> LinkRecord {
     serde_json::from_value(json!({
         "environmentId": environment_id,
@@ -64,7 +76,7 @@ fn a_workspace_is_reachable_only_when_a_relay_link_exists_for_it() {
         workspace("env-primary", json!("Primary"), json!("personal")),
         workspace("env-second", json!("Second"), json!("workspace")),
     ]))];
-    let view = build_machines_view(&machines, &[link("env-primary", "Primary")]);
+    let view = build_machines_view(&machines, &[link("env-primary", "Primary")], Some("person"));
 
     assert_eq!(
         view.rows.iter().map(|row| (row.environment_id.as_str(), row.linked)).collect::<Vec<_>>(),
@@ -80,25 +92,27 @@ fn a_link_whose_workspace_is_on_no_visible_machine_is_still_reported() {
     let view = build_machines_view(
         &machines,
         &[link("env-primary", "Primary"), link("env-elsewhere", "Lab")],
+        Some("person"),
     );
     assert_eq!(
         view.unregistered_links.iter().map(|entry| entry.environment_id.as_str()).collect::<Vec<_>>(),
         vec!["env-elsewhere"]
     );
-    assert!(format_machines_view(&view).contains("env-elsewhere"));
+    assert!(format_machines_view(&view, false).contains("env-elsewhere"));
 }
 
 #[test]
 fn a_workspace_with_no_label_falls_back_to_its_id() {
     let machines = vec![machine(json!([workspace("env-primary", json!("   "), Value::Null)]))];
-    let view = build_machines_view(&machines, &[]);
+    let view = build_machines_view(&machines, &[], Some("person"));
     assert_eq!(view.rows[0].label, "env-primary");
     assert_eq!(view.rows[0].kind, "-");
 }
 
 #[test]
 fn nothing_yet_is_said_plainly() {
-    assert!(format_machines_view(&build_machines_view(&[], &[])).contains("No machines yet"));
+    assert!(format_machines_view(&build_machines_view(&[], &[], Some("person")), false)
+        .contains("No machines yet"));
 }
 
 #[test]
@@ -120,10 +134,11 @@ fn the_table_pads_every_column_and_leaves_no_trailing_spaces() {
 fn the_notes_never_claim_a_live_check() {
     assert!(MACHINE_STATE_NOTE.contains("not a live check"));
     let machines = vec![machine(json!([workspace("env-primary", json!("Primary"), json!("personal"))]))];
-    let reachable = format_sessions_view(&build_machines_view(&machines, &[link("env-primary", "Primary")]));
+    let reachable =
+        format_sessions_view(&build_machines_view(&machines, &[link("env-primary", "Primary")], Some("person")));
     assert!(reachable.contains("env-primary"));
     assert!(reachable.contains(SESSIONS_NOT_EXPOSED_NOTE));
-    let unreachable = format_sessions_view(&build_machines_view(&machines, &[]));
+    let unreachable = format_sessions_view(&build_machines_view(&machines, &[], Some("person")));
     assert!(unreachable.contains("No workspace you can reach."));
     assert!(unreachable.contains(SESSIONS_NOT_EXPOSED_NOTE));
 }
@@ -131,11 +146,71 @@ fn the_notes_never_claim_a_live_check() {
 #[test]
 fn filtering_accepts_a_machine_name_a_machine_id_or_a_workspace_id() {
     let machines = vec![machine(json!([workspace("env-primary", json!("Primary"), json!("personal"))]))];
-    let view = build_machines_view(&machines, &[link("env-primary", "Primary")]);
+    let view = build_machines_view(&machines, &[link("env-primary", "Primary")], Some("person"));
     for needle in ["workbench", "WORKBENCH", "machine-1", "env-primary"] {
         assert_eq!(filter_view_by_machine(&view, needle).rows.len(), 1, "{needle}");
     }
     assert!(filter_view_by_machine(&view, "other").rows.is_empty());
+}
+
+// -- whose workspace it is -------------------------------------------------
+
+/// The laptop this rule was written for: your personal workspace, a second
+/// person's personal workspace on the same machine, and a shared one that
+/// belongs to nobody in particular.
+fn two_people_on_one_machine(viewer: Option<&str>) -> svartal::view::MachinesView {
+    let machines = vec![machine(json!([
+        owned_workspace("env-mine", "personal", json!("person")),
+        owned_workspace("env-theirs", "personal", json!("other")),
+        owned_workspace("env-shared", "workspace", Value::Null),
+    ]))];
+    build_machines_view(&machines, &[], viewer)
+}
+
+#[test]
+fn a_second_persons_personal_workspace_is_not_in_your_listing() {
+    let view = two_people_on_one_machine(Some("person"));
+    assert_eq!(
+        view.yours().rows.iter().map(|row| row.environment_id.as_str()).collect::<Vec<_>>(),
+        vec!["env-mine", "env-shared"]
+    );
+    // The view itself keeps every row; only the listing leaves one out.
+    assert_eq!(view.rows.len(), 3);
+    assert_eq!(view.rows[1].owner.as_deref(), Some("other"));
+    assert!(view.rows[1].belongs_to_another);
+    assert!(!view.rows[0].belongs_to_another, "your own personal workspace is yours");
+    assert!(!view.rows[2].belongs_to_another, "a shared workspace belongs to nobody");
+
+    let table = format_machines_view(&view.yours(), false);
+    assert!(!table.contains("env-theirs"));
+    assert!(!table.contains("OWNER"), "there is no owner column without --all");
+}
+
+#[test]
+fn all_shows_the_other_rows_and_only_then_names_their_owner() {
+    let table = format_machines_view(&two_people_on_one_machine(Some("person")), true);
+    let lines: Vec<&str> = table.lines().collect();
+    assert!(lines[0].contains("OWNER"));
+    assert!(lines[2].contains("env-theirs") && lines[2].contains("other"));
+    // An owner Svartal did not name reads as a dash, like every other unknown
+    // cell in these tables.
+    assert_eq!(
+        lines[3].split_whitespace().collect::<Vec<_>>(),
+        vec!["workbench", "env-shared", "env-shared", "workspace", "-", "active", "not", "linked", "unknown"]
+    );
+}
+
+#[test]
+fn without_a_username_on_either_side_nothing_is_somebody_elses() {
+    // An older server sends no owner at all, and a session that never carried
+    // a username cannot compare one. Both keep every row listed.
+    let no_owner = build_machines_view(
+        &[machine(json!([workspace("env-primary", json!("Primary"), json!("personal"))]))],
+        &[],
+        Some("person"),
+    );
+    assert_eq!(no_owner.yours().rows.len(), 1);
+    assert_eq!(two_people_on_one_machine(None).yours().rows.len(), 3);
 }
 
 // -- the commands ----------------------------------------------------------
@@ -292,7 +367,7 @@ fn when_both_listings_fail_the_api_error_is_the_one_reported() {
             (url.contains("/api/v1/client/machines") || url.contains("/v1/environments"))
                 .then(|| json_response(500, &json!({ "error": "boom" })))
         },
-        |context, out| commands::machines(context, out, false),
+        |context, out| commands::machines(context, out, false, false),
     );
     let error = outcome.unwrap_err();
     assert_eq!(error.0, "Could not list your machines.");
@@ -339,7 +414,7 @@ fn whoami_json_is_the_same_four_fields() {
 fn machines_joins_the_machine_listing_with_the_relay_links() {
     let harness = Harness::new();
     let (outcome, output, urls) =
-        harness.run(true, |context, out| commands::machines(context, out, false));
+        harness.run(true, |context, out| commands::machines(context, out, false, false));
     outcome.unwrap();
     let issuer = harness.fixture["issuer"].as_str().unwrap();
     let relay = harness.fixture["relayUrl"].as_str().unwrap();
@@ -356,7 +431,8 @@ fn machines_joins_the_machine_listing_with_the_relay_links() {
 #[test]
 fn machines_json_emits_the_same_join_as_data() {
     let harness = Harness::new();
-    let (outcome, output, _) = harness.run(true, |context, out| commands::machines(context, out, true));
+    let (outcome, output, _) =
+        harness.run(true, |context, out| commands::machines(context, out, true, false));
     outcome.unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     let workspaces = parsed["workspaces"].as_array().unwrap();
@@ -369,6 +445,101 @@ fn machines_json_emits_the_same_join_as_data() {
     );
     assert_eq!(workspaces[0]["linkedAt"].as_str().unwrap(), "2026-08-01T10:00:00Z");
     assert!(parsed["unregisteredLinks"].as_array().unwrap().is_empty());
+}
+
+/// The same machine `two_people_on_one_machine` describes, on the wire. The
+/// shared workspace carries no `owner` key at all, which is what an older
+/// server sends for every row.
+const SHARED_MACHINE_BODY: &str = r#"{
+  "data": [
+    {
+      "id": "machine-1",
+      "name": "m3",
+      "origin": "donated",
+      "lifecycleState": "open",
+      "presence": "online",
+      "lastSeenAt": "2026-08-13T09:00:00Z",
+      "environments": [
+        { "id": "row-1", "environmentId": "env-mine", "label": "Mine", "kind": "personal", "owner": "person", "lifecycleState": "active" },
+        { "id": "row-2", "environmentId": "env-theirs", "label": "Theirs", "kind": "personal", "owner": "other", "lifecycleState": "active" },
+        { "id": "row-3", "environmentId": "env-shared", "label": "Shared", "kind": "workspace", "lifecycleState": "active" }
+      ]
+    }
+  ]
+}"#;
+
+const MINE_IS_LINKED_BODY: &str = r#"{
+  "environments": [
+    {
+      "environmentId": "env-mine",
+      "label": "Mine",
+      "endpoint": { "httpBaseUrl": "https://workspace.example.test", "wsBaseUrl": "wss://workspace.example.test", "providerKind": "cloudflare_tunnel" },
+      "linkedAt": "2026-08-01T10:00:00Z"
+    }
+  ]
+}"#;
+
+fn shared_machine(url: &str) -> Option<Response> {
+    if url.contains("/api/v1/client/machines") {
+        return Some(json_response(200, &serde_json::from_str(SHARED_MACHINE_BODY).unwrap()));
+    }
+    if url.ends_with("/v1/environments") {
+        return Some(json_response(200, &serde_json::from_str(MINE_IS_LINKED_BODY).unwrap()));
+    }
+    None
+}
+
+#[test]
+fn machines_lists_your_own_workspaces_and_all_adds_the_other_ones() {
+    let harness = Harness::new();
+    let (outcome, output, _) = harness
+        .run_with_data_plane(shared_machine, |context, out| {
+            commands::machines(context, out, false, false)
+        });
+    outcome.unwrap();
+    assert!(output.contains("env-mine") && output.contains("env-shared"));
+    assert!(!output.contains("env-theirs"), "somebody else's personal workspace is not yours");
+    assert!(!output.contains("OWNER"));
+    assert_eq!(output.lines().last().unwrap(), MACHINE_STATE_NOTE);
+
+    let (outcome, output, _) = harness
+        .run_with_data_plane(shared_machine, |context, out| {
+            commands::machines(context, out, false, true)
+        });
+    outcome.unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert!(lines[0].contains("OWNER"));
+    assert!(lines[1].contains("env-mine") && lines[1].contains("person"));
+    assert!(lines[2].contains("env-theirs") && lines[2].contains("other"));
+    assert!(lines[3].contains("env-shared"));
+}
+
+#[test]
+fn machines_json_carries_every_workspace_and_its_owner_whatever_all_says() {
+    let harness = Harness::new();
+    for all in [false, true] {
+        let (outcome, output, _) = harness
+            .run_with_data_plane(shared_machine, move |context, out| {
+                commands::machines(context, out, true, all)
+            });
+        outcome.unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            parsed["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| (row["environmentId"].clone(), row["owner"].clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (json!("env-mine"), json!("person")),
+                (json!("env-theirs"), json!("other")),
+                // No `owner` key on the wire reads as no owner, not a refusal
+                // to decode the listing.
+                (json!("env-shared"), Value::Null),
+            ]
+        );
+    }
 }
 
 #[test]
