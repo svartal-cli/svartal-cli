@@ -310,7 +310,7 @@ pub struct ApiReply {
 /// The `detail` sentence Svartal puts in its error bodies, when there is one:
 /// `{"errors": {"detail": "..."}}`, or a validation map `{"errors": {"title":
 /// ["can't be blank"]}}`, or a plain `{"error": "..."}`.
-fn error_detail(body: &[u8]) -> Option<String> {
+pub(crate) fn error_detail(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
     if let Some(detail) = value.pointer("/errors/detail").and_then(Value::as_str) {
         return Some(detail.to_string());

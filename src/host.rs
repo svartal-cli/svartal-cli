@@ -343,9 +343,10 @@ fn send_json(
         return Err(ApiError::Unauthorized { action: action.to_string() });
     }
     if !response.is_success() {
-        return Err(ApiError::Failed {
+        return Err(ApiError::Refused {
             action: action.to_string(),
-            detail: format!("Svartal returned HTTP {}.", response.status),
+            status: response.status,
+            detail: crate::api::error_detail(&response.body),
         });
     }
     response

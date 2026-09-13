@@ -1198,8 +1198,14 @@ pub fn host_up(
         &session.access_token,
         &name,
         existing.as_ref().map(|record| record.machine_id.as_str()),
-    )
-    .map_err(CliError::of)?;
+    );
+    let registration = match registration {
+        Err(crate::api::ApiError::Refused { status: 404, .. }) if existing.is_some() => {
+            writeln!(out, "The saved machine registration is no longer available; registering this computer again…").ok();
+            host::register_host(context.http, &context.config.api_base_url, &session.access_token, &name, None)
+        }
+        result => result,
+    }.map_err(CliError::of)?;
     let token = registration
         .enrollment_token
         .clone()
@@ -1381,13 +1387,14 @@ pub fn host_status(
 
 /// `sv host down [--purge] [--instance <name>]`: stop hosting. Without
 /// `--purge` the machine's identity and state stay on their volumes, so
-/// `sv host up` resumes it; with it, they are deleted.
+/// `sv host up` resumes it; with it, the local runtime identity is deleted.
+/// The nonsecret account registration stays so the next `up` can re-enroll.
 ///
 /// Without `--instance` this is the default machine and only that one:
 /// stopping every machine on the computer is not something a person should
 /// get by leaving a word out.
 pub fn host_down(
-    context: &Context<'_>,
+    _context: &Context<'_>,
     out: &mut dyn Write,
     docker: &dyn crate::host::Docker,
     purge: bool,
@@ -1395,7 +1402,6 @@ pub fn host_down(
 ) -> Result<(), CliError> {
     use crate::host;
     let instance = host::Instance::parse(instance).map_err(CliError)?;
-    let state = &context.config.state_directory;
     if host::container_state(docker, &instance).map_err(CliError)?.is_some() {
         let removed = docker.run(&["rm".to_string(), "-f".to_string(), instance.container()], None).map_err(CliError)?;
         if !removed.success {
@@ -1407,10 +1413,14 @@ pub fn host_down(
     }
     if purge {
         for volume in [instance.config_volume(), instance.state_volume(), instance.run_volume()] {
-            let _ = docker.run(&["volume".to_string(), "rm".to_string(), "-f".to_string(), volume], None);
+            let removed = docker.run(&["volume".to_string(), "rm".to_string(), "-f".to_string(), volume.clone()], None).map_err(CliError)?;
+            if !removed.success {
+                return Err(CliError(format!("Could not remove machine volume {volume}: {}. The account registration was kept; retry `sv host down --purge`.", removed.stderr.trim())));
+            }
         }
-        host::remove_record(state, &instance);
-        writeln!(out, "The machine's identity and state volumes were deleted. Workspace containers and their volumes were left alone; remove them with docker if you want them gone.").ok();
+        // Keep the nonsecret machine id: deleting it leaves an account record
+        // that the next registration cannot reuse, and its name then collides.
+        writeln!(out, "The machine's local identity and state volumes were deleted. Its account registration was kept so `sv host up` can re-enroll it. Workspace containers and their volumes were left alone; remove them with docker if you want them gone.").ok();
     } else {
         writeln!(out, "The machine's identity and state were kept; `sv host up` resumes it. Workspace containers keep running.").ok();
     }

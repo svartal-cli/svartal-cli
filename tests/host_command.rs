@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use common::{FakeTransport, TempDir, fixture, json_response};
 use svartal::browser::NoBrowser;
+use svartal::http::HttpTransport;
 use svartal::commands::{self, Context};
 use svartal::config::resolve_config;
 use svartal::host::{self, Docker, DockerOutput};
@@ -192,6 +193,13 @@ fn run<F>(signed_in: bool, docker: &FakeDocker, states: Vec<&'static str>, with_
 where
     F: FnOnce(&Context<'_>, &mut dyn std::io::Write, &dyn Docker) -> Result<(), commands::CliError>,
 {
+    run_http(signed_in, docker, transport(fixture("oidc.json"), states, with_release), state_dir, command)
+}
+
+fn run_http<F>(signed_in: bool, docker: &FakeDocker, http: FakeTransport, state_dir: &std::path::Path, command: F) -> Run
+where
+    F: FnOnce(&Context<'_>, &mut dyn std::io::Write, &dyn Docker) -> Result<(), commands::CliError>,
+{
     let _turn = ENVIRONMENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // SAFETY: the tests here set the same values; the poll interval only
     // shortens the wait and HOME only points the registry lookup at a
@@ -202,7 +210,6 @@ where
     }
     let fixture = fixture("oidc.json");
     let now = fixture["nowEpochMs"].as_i64().unwrap();
-    let http = transport(fixture.clone(), states, with_release);
     let storage = if signed_in {
         MemoryTokenStorage::with_value(&fixture["storedTokens"].to_string())
     } else {
@@ -453,7 +460,7 @@ fn no_engine_no_release_and_no_session_each_get_their_sentence() {
 }
 
 #[test]
-fn status_and_down_read_the_record_and_purge_deletes_it() {
+fn purge_keeps_the_registration_and_the_next_up_reuses_it() {
     let dir = TempDir::new("host-status-down");
     let docker = FakeDocker::new(true);
     let run_before = run(true, &docker, vec![], true, dir.path(), |context, out, docker| commands::host_status(context, out, docker, None));
@@ -480,7 +487,12 @@ fn status_and_down_read_the_record_and_purge_deletes_it() {
 
     let run_purge = run(true, &docker, vec![], true, dir.path(), |context, out, docker| commands::host_down(context, out, docker, true, None));
     run_purge.outcome.unwrap();
-    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_none(), "purge kept the record");
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some(), "purge forgot the account registration");
+    assert!(run_purge.output.contains("account registration was kept"));
+    let next = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| commands::host_up(context, out, docker, None, None, None));
+    next.outcome.unwrap();
+    assert_eq!(next.posted.len(), 1);
+    assert_eq!(next.posted[0]["machine_id"], MACHINE_ID);
     let calls = docker.calls();
     for volume in ["svartal-host-config", "svartal-host-state", "svartal-run"] {
         assert!(calls.iter().any(|call| call == &format!("volume rm -f {volume}")), "{calls:?}");
@@ -691,6 +703,96 @@ fn down_with_an_instance_removes_only_that_machine() {
     for volume in ["svartal-host-config", "svartal-host-state", "svartal-run"] {
         assert!(!calls.iter().any(|call| call == &format!("volume rm -f {volume}")), "{calls:?}");
     }
-    assert!(host::read_record(&dir.path().join("config"), &instance("m3b")).is_none());
+    assert!(host::read_record(&dir.path().join("config"), &instance("m3b")).is_some());
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
+}
+
+
+fn refusing_registration(statuses: Vec<u16>) -> FakeTransport {
+    let inner = transport(fixture("oidc.json"), vec!["ready"], true);
+    let statuses = Mutex::new(std::collections::VecDeque::from(statuses));
+    FakeTransport::new(move |request| {
+        if request.method == "POST" && request.url.ends_with("/host-machines")
+            && let Some(status) = statuses.lock().unwrap().pop_front()
+        {
+            return json_response(status, &json!({"errors": {"name": ["is already the name of another machine you own"]}}));
+        }
+        inner.send(request.clone()).unwrap()
+    })
+}
+
+#[test]
+fn a_missing_registration_is_replaced_once_without_erasing_runtime_volumes() {
+    let dir = TempDir::new("host-missing-registration");
+    host::write_record(&dir.path().join("config"), &host::Instance::default_instance(), &host::HostRecord {
+        machine_id: "missing-machine".into(), machine_name: "laptop".into(), machine_short_name: None, image: "img".into(),
+    }).unwrap();
+    let docker = FakeDocker::new(true);
+    let result = run_http(true, &docker, refusing_registration(vec![404]), dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, None, None)
+    });
+    result.outcome.unwrap();
+    assert_eq!(result.posted.len(), 2);
+    assert_eq!(result.posted[0]["machine_id"], "missing-machine");
+    assert!(result.posted[1].get("machine_id").is_none());
+    assert_eq!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).unwrap().machine_id, MACHINE_ID);
+    assert!(!docker.calls().iter().any(|call| call.starts_with("volume rm")));
+    assert!(result.output.contains("registering this computer again"));
+}
+
+#[test]
+fn registration_does_not_retry_other_refusals_or_a_first_registration_404() {
+    for (existing, status) in [(true, 401), (true, 403), (true, 422), (true, 500), (false, 404)] {
+        let dir = TempDir::new("host-registration-refused");
+        if existing { record(&dir, &host::Instance::default_instance(), "laptop"); }
+        let docker = FakeDocker::new(true);
+        let result = run_http(true, &docker, refusing_registration(vec![status]), dir.path(), |context, out, docker| {
+            commands::host_up(context, out, docker, None, None, None)
+        });
+        let error = result.outcome.unwrap_err().to_string();
+        assert_eq!(result.posted.len(), 1);
+        if status == 401 || status == 403 { assert!(error.contains("sv login"), "{error}"); }
+        else {
+            assert!(error.contains(&format!("HTTP {status}")), "{error}");
+            assert!(error.contains("name is already the name of another machine you own"), "{error}");
+        }
+        assert!(!docker.calls().iter().any(|call| call.starts_with("run -d")));
+    }
+}
+
+#[test]
+fn a_failed_replacement_keeps_the_saved_registration_and_running_container() {
+    let dir = TempDir::new("host-registration-retry-fails");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    let docker = FakeDocker::new(true);
+    docker.already_running(host::CONTAINER_NAME);
+    let result = run_http(true, &docker, refusing_registration(vec![404, 422]), dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, None, None)
+    });
+    assert!(result.outcome.unwrap_err().to_string().contains("HTTP 422"));
+    assert_eq!(result.posted.len(), 2);
+    assert_eq!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).unwrap().machine_id, MACHINE_ID);
+    assert!(!docker.calls().iter().any(|call| call.starts_with("rm ") || call.starts_with("volume rm")));
+}
+
+#[test]
+fn a_volume_removal_failure_is_not_reported_as_a_successful_purge() {
+    let dir = TempDir::new("host-purge-failed");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    struct VolumeInUse(FakeDocker);
+    impl Docker for VolumeInUse {
+        fn run(&self, args: &[String], stdin: Option<&[u8]>) -> Result<DockerOutput, String> {
+            if args.first().map(String::as_str) == Some("volume") {
+                return Ok(DockerOutput { success: false, stdout: String::new(), stderr: "volume is in use".into() });
+            }
+            self.0.run(args, stdin)
+        }
+    }
+    let docker = VolumeInUse(FakeDocker::new(true));
+    let result = run(true, &docker.0, vec![], true, dir.path(), |context, out, _| {
+        commands::host_down(context, out, &docker, true, None)
+    });
+    assert!(result.outcome.unwrap_err().to_string().contains("volume is in use"));
+    assert!(!result.output.contains("volumes were deleted"));
     assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
 }
