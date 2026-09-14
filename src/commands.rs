@@ -1245,6 +1245,33 @@ pub fn host_up(
     // The name Svartal recorded, which is what `sv envs` and `sv shell` show.
     let name = registration.machine.name.clone();
 
+    // The one case the ordinary enrollment token cannot serve: this is the
+    // SAME registration as before (a purge keeps it, deleting only the
+    // volumes) and the broker identity that enrollment created is gone with
+    // them. The machine still has a broker on Svartal's side, so bootstrapping
+    // the ordinary way is refused — the owner-authorized replacement is the
+    // way to give this machine a fresh identity. Anything else (a fresh
+    // registration, or a retained identity the machine resumes) uses the
+    // token registration just issued; a Svartal without the endpoint but
+    // also without a broker answers 404, and the ordinary token enrolls fine.
+    let registration_reused =
+        existing.as_ref().map(|record| record.machine_id.as_str()) == Some(registration.machine.id.as_str());
+    let mut enrollment_token = token;
+    if registration_reused
+        && !host::config_volume_has_broker_identity(docker, &instance, &image).map_err(CliError)?
+    {
+        match host::replace_broker_identity(
+            context.http,
+            &context.config.api_base_url,
+            &session.access_token,
+            &registration.machine.id,
+        ) {
+            Ok(replacement) => enrollment_token = replacement.secret,
+            Err(crate::api::ApiError::Refused { status: 404, .. }) => {}
+            Err(error) => return Err(CliError::of(error)),
+        }
+    }
+
     if host::container_state(docker, &instance).map_err(CliError)?.is_some() {
         let removed = docker.run(&["rm".to_string(), "-f".to_string(), instance.container()], None).map_err(CliError)?;
         if !removed.success {
@@ -1285,7 +1312,7 @@ pub fn host_up(
         instance: &instance,
         image: &image,
         machine_id: &registration.machine.id,
-        enrollment_token: &token,
+        enrollment_token: &enrollment_token,
         managed_image_ref: &release.image_ref,
         api_base_url: &context.config.api_base_url,
         relay_url: &context.config.relay_url,
@@ -1323,8 +1350,18 @@ pub fn host_up(
     // repairs it (the poll itself is what asks it to), and saying "ready" in
     // the meantime would be a success the same person's `sv machines` calls
     // `not linked`.
+    //
+    // A ready workspace is also not enough on its own: the workspace record
+    // can read ready from an earlier run while the machine container this
+    // command just started is still failing its bootstrap — Svartal refuses
+    // a duplicate enrollment with a 409, the broker identity never lands,
+    // every machine answer stays refused, and a success printed here would
+    // be one `sv shell` away from falling over. So success additionally
+    // requires the running container to have completed its broker bootstrap,
+    // and the ready sentence is said only once that is true.
     let mut last = String::new();
     let mut running_but_unseen = false;
+    let mut bootstrap_pending = false;
     for _ in 0..HOST_WAIT_ATTEMPTS {
         let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &registration.machine.id)
             .map_err(CliError::of)?;
@@ -1332,19 +1369,51 @@ pub fn host_up(
         // `None` is an older Svartal, or a machine with no workspace yet:
         // neither is a reason to keep a person waiting.
         running_but_unseen = state == Some("ready") && status.linked == Some(false);
-        let sentence = if running_but_unseen {
-            host::NOT_VISIBLE_YET_SENTENCE.to_string()
-        } else {
-            host::intent_sentence(status.workspace_intent.as_ref())
+        // The ready sentence is held back until the container and its broker
+        // identity are verified below: printing it first would claim a
+        // readiness this loop may still take back.
+        let sentence = match state {
+            _ if running_but_unseen => host::NOT_VISIBLE_YET_SENTENCE.to_string(),
+            Some("ready") => String::new(),
+            _ => host::intent_sentence(status.workspace_intent.as_ref()),
         };
-        if sentence != last {
+        if !sentence.is_empty() && sentence != last {
             writeln!(out, "{sentence}").ok();
             last = sentence.clone();
         }
+        let container_running =
+            host::container_state(docker, &instance).map_err(CliError)? == Some(true);
         match state {
             Some("ready") if !running_but_unseen => {
-                writeln!(out, "Run `sv envs` to see it, or `sv shell {name}` to open it.").ok();
-                return Ok(());
+                if !container_running {
+                    let logs = host::recent_logs(docker, &instance);
+                    return Err(CliError(format!(
+                        "The workspace reads ready, but the machine container is not running. Its log ends with:\n{logs}\nFix the cause and run `sv host up` again."
+                    )));
+                }
+                let probe = docker
+                    .run(&host::bootstrap_probe_args(&instance), None)
+                    .map_err(CliError)?;
+                match host::interpret_bootstrap_probe(&probe) {
+                    host::BrokerBootstrap::Bootstrapped => {
+                        writeln!(out, "Your workspace is ready.").ok();
+                        writeln!(out, "Run `sv envs` to see it, or `sv shell {name}` to open it.").ok();
+                        return Ok(());
+                    }
+                    host::BrokerBootstrap::NotYet => {
+                        if !bootstrap_pending {
+                            writeln!(out, "The machine's broker identity is still bootstrapping…").ok();
+                            bootstrap_pending = true;
+                        }
+                    }
+                    host::BrokerBootstrap::Unreadable => {
+                        let logs = host::recent_logs(docker, &instance);
+                        return Err(CliError(format!(
+                            "The workspace reads ready, but this machine's broker bootstrap could not be checked: {}. The machine's log ends with:\n{logs}\nFix the cause and run `sv host up` again.",
+                            probe.stderr.trim()
+                        )));
+                    }
+                }
             }
             Some("failed") => {
                 let logs = host::recent_logs(docker, &instance);
@@ -1354,13 +1423,19 @@ pub fn host_up(
             }
             _ => {}
         }
-        if host::container_state(docker, &instance).map_err(CliError)? != Some(true) {
+        if !container_running {
             let logs = host::recent_logs(docker, &instance);
             return Err(CliError(format!(
                 "The machine container stopped. Its log ends with:\n{logs}\nFix the cause and run `sv host up` again."
             )));
         }
         std::thread::sleep(host_poll_interval());
+    }
+    if bootstrap_pending {
+        let logs = host::recent_logs(docker, &instance);
+        return Err(CliError(format!(
+            "The workspace reads ready, but the machine's broker identity did not complete bootstrapping. The machine's log ends with:\n{logs}\nFix the cause and run `sv host up` again."
+        )));
     }
     let ran_out = if running_but_unseen {
         "Your workspace is running, but Svartal has not made it visible to your account yet."
@@ -1471,7 +1546,7 @@ pub fn host_down(
         writeln!(out, "No machine container{} was running.", instance_phrase(&instance)).ok();
     }
     if purge {
-        for volume in [instance.config_volume(), instance.state_volume(), instance.run_volume()] {
+        for volume in [instance.config_volume(), instance.state_volume()] {
             let removed = docker.run(&["volume".to_string(), "rm".to_string(), "-f".to_string(), volume.clone()], None).map_err(CliError)?;
             // A volume an earlier purge already removed is done, not failed:
             // the retry this message points at must be able to finish.
@@ -1479,9 +1554,35 @@ pub fn host_down(
                 return Err(CliError(format!("Could not remove machine volume {volume}: {}. The account registration was kept; retry `sv host down --purge`.", removed.stderr.trim())));
             }
         }
+        // The run volume is shared: workspace containers mount it, and this
+        // purge deliberately keeps them alive, so while any of them — running
+        // or stopped — still references it, the engine would refuse the
+        // volume's removal on every retry forever. It is removed only when
+        // nothing references it, and kept, said out loud, when something
+        // does. A listing that fails is a failure, not a quiet keep or
+        // remove; and a removal that fails after an empty listing (a
+        // container took the volume in the race) still reports the retry.
+        let run_volume = instance.run_volume();
+        let runtime_kept = match host::run_volume_in_use(docker, &instance) {
+            Ok(true) => true,
+            Ok(false) => {
+                let removed = docker.run(&["volume".to_string(), "rm".to_string(), "-f".to_string(), run_volume.clone()], None).map_err(CliError)?;
+                if !removed.success && !host::volume_rm_reports_missing(&removed.stderr) {
+                    return Err(CliError(format!("Could not remove machine volume {run_volume}: {}. The account registration was kept; retry `sv host down --purge`.", removed.stderr.trim())));
+                }
+                false
+            }
+            Err(reason) => {
+                return Err(CliError(format!("{reason}. The account registration was kept; retry `sv host down --purge`.")));
+            }
+        };
         // Keep the nonsecret machine id: deleting it leaves an account record
         // that the next registration cannot reuse, and its name then collides.
-        writeln!(out, "The machine's local identity and state volumes were deleted. Its account registration was kept so `sv host up` can re-enroll it. Workspace containers and their volumes were left alone; remove them with docker if you want them gone.").ok();
+        if runtime_kept {
+            writeln!(out, "The machine's local identity and state volumes were deleted. The shared runtime volume {run_volume} was kept because workspace containers still mount it; a later `sv host down --purge` removes it once they are gone. The account registration was kept so `sv host up` can re-enroll it. Workspace containers and their volumes were left alone; remove them with docker if you want them gone.").ok();
+        } else {
+            writeln!(out, "The machine's local identity and state volumes were deleted. Its account registration was kept so `sv host up` can re-enroll it. Workspace containers and their volumes were left alone; remove them with docker if you want them gone.").ok();
+        }
     } else {
         writeln!(out, "The machine's identity and state were kept; `sv host up` resumes it. Workspace containers keep running.").ok();
     }

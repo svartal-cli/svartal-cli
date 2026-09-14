@@ -24,6 +24,9 @@ use svartal::store::MemoryTokenStorage;
 
 const MACHINE_ID: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const TOKEN: &str = "svartal-enroll-one-time-secret-value";
+/// The secret a broker-identity replacement hands back, distinct from the
+/// ordinary enrollment token so a test can tell which one the machine got.
+const REPLACEMENT_SECRET: &str = "kbr-replacement-secret-value";
 const IMAGE_REF: &str = "ghcr.io/x/k3@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// The engine: every call recorded, the env-file a `run` was handed copied at
@@ -34,6 +37,19 @@ struct FakeDocker {
     stdin: Mutex<Vec<String>>,
     env_files: Mutex<Vec<String>>,
     containers: Mutex<BTreeMap<String, bool>>,
+    /// The engine's answer to `docker ps -a --filter volume=<name>`: the
+    /// container ids (one per line) that still mount each volume. A volume
+    /// absent from the map is mounted by nothing.
+    volume_users: Mutex<BTreeMap<String, String>>,
+    /// The engine's answer to the broker-bootstrap probe
+    /// (`docker exec <container> test -s /etc/svartal/provider-broker/broker.env`)
+    /// per container, replayed in order (the last answer repeats). A
+    /// container absent from the map bootstrapped successfully (the ordinary
+    /// case every existing test runs on).
+    broker_env_probes: Mutex<BTreeMap<String, Vec<DockerOutput>>>,
+    /// Whether the one-shot config-volume probe (`docker run --rm --network
+    /// none ... test -s broker.env`) finds the machine's broker identity.
+    config_volume_identity: bool,
     engine_up: bool,
 }
 
@@ -44,8 +60,18 @@ impl FakeDocker {
             stdin: Mutex::new(Vec::new()),
             env_files: Mutex::new(Vec::new()),
             containers: Mutex::new(BTreeMap::new()),
+            volume_users: Mutex::new(BTreeMap::new()),
+            broker_env_probes: Mutex::new(BTreeMap::new()),
+            config_volume_identity: true,
             engine_up,
         }
+    }
+
+    /// Whether the config volume still holds the broker identity — a purge
+    /// that deleted the volumes answers false.
+    fn with_config_volume_identity(mut self, present: bool) -> Self {
+        self.config_volume_identity = present;
+        self
     }
 
     fn calls(&self) -> Vec<String> {
@@ -55,6 +81,20 @@ impl FakeDocker {
     /// A container the engine already has before the command runs.
     fn already_running(&self, container: &str) {
         self.containers.lock().unwrap().insert(container.to_string(), true);
+    }
+
+    /// The broker-bootstrap probe inside this container answers with these
+    /// outcomes in order (the last one repeats). A plain `false` is `test -s`
+    /// exiting 1 with nothing else said; a `false` carrying daemon stderr is
+    /// an engine that could not answer the probe at all.
+    fn broker_env_probe_answers(&self, container: &str, outputs: Vec<DockerOutput>) {
+        self.broker_env_probes.lock().unwrap().insert(container.to_string(), outputs);
+    }
+
+    /// Containers that still mount a volume, as `docker ps -a` would list
+    /// them for the purge's run-volume probe.
+    fn volume_mounted_by(&self, volume: &str, ids: &str) {
+        self.volume_users.lock().unwrap().insert(volume.to_string(), ids.to_string());
     }
 
     fn container_names(&self) -> Vec<String> {
@@ -84,7 +124,30 @@ impl Docker for FakeDocker {
                 self.containers.lock().unwrap().remove(&name);
                 ok(&format!("{name}\n"))
             }
+            Some("run") if args.contains(&"--network".to_string()) => Ok(DockerOutput {
+                success: self.config_volume_identity,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
             Some("run") if args.contains(&"--entrypoint".to_string()) => ok(""),
+            // The broker-bootstrap probe: `test -s broker.env` inside the
+            // machine container. Exit 1 with no other complaint is the
+            // not-bootstrapped-yet answer; whatever the engine said for this
+            // container is replayed verbatim.
+            Some("exec") => {
+                let container = args.get(1).cloned().unwrap_or_default();
+                let mut probes = self.broker_env_probes.lock().unwrap();
+                let answers = probes.get_mut(&container);
+                Ok(match answers {
+                    None => DockerOutput { success: true, stdout: String::new(), stderr: String::new() },
+                    Some(answers) if answers.len() > 1 => answers.remove(0),
+                    Some(answers) => answers.first().cloned().unwrap_or(DockerOutput {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    }),
+                })
+            }
             Some("run") => {
                 let env_file = args
                     .iter()
@@ -103,6 +166,19 @@ impl Docker for FakeDocker {
                 ok("c0ffee\n")
             }
             Some("logs") => ok("{\"event\":\"host_serving\"}\n"),
+            // The purge's run-volume probe: which containers still mount it.
+            Some("ps") => {
+                let volume = args
+                    .iter()
+                    .position(|argument| argument == "--filter")
+                    .and_then(|index| args.get(index + 1))
+                    .and_then(|filter| filter.strip_prefix("volume="))
+                    .map(str::to_string);
+                match volume {
+                    Some(volume) => ok(self.volume_users.lock().unwrap().get(&volume).map(String::as_str).unwrap_or("")),
+                    None => Err("unexpected docker call: ps without a volume filter".to_string()),
+                }
+            }
             Some("volume") => ok(""),
             other => Err(format!("unexpected docker call: {other:?}")),
         }
@@ -121,9 +197,29 @@ fn poll_answer(answer: &str) -> (&str, Option<bool>) {
     }
 }
 
+/// What Svartal answers to the owner-authorized broker-identity replacement.
+#[derive(Debug, Clone, Copy)]
+enum Replacement {
+    /// 201: a fresh identity secret for the machine's existing broker.
+    Issued,
+    /// 404: the machine has no broker, so the ordinary token is the way in.
+    NoBroker,
+    /// 409: the replacement was refused.
+    Refused,
+}
+
 /// The control plane: identity endpoints from the fixture, plus the two
 /// host-machine routes. `states` is what successive GETs answer.
 fn transport(fixture: Value, states: Vec<&'static str>, with_release: bool) -> FakeTransport {
+    transport_replacement(fixture, states, with_release, Replacement::Issued)
+}
+
+fn transport_replacement(
+    fixture: Value,
+    states: Vec<&'static str>,
+    with_release: bool,
+    replacement: Replacement,
+) -> FakeTransport {
     let issuer = fixture["issuer"].as_str().unwrap().to_string();
     let polls = Mutex::new(0usize);
     FakeTransport::new(move |request| {
@@ -135,6 +231,19 @@ fn transport(fixture: Value, states: Vec<&'static str>, with_release: bool) -> F
             return json_response(200, &fixture["jwks"]);
         }
         let release = if with_release { json!({ "imageRef": IMAGE_REF, "version": "v9" }) } else { Value::Null };
+        if url.ends_with("/broker-identity-replacement") && request.method == "POST" {
+            return match replacement {
+                Replacement::Issued => {
+                    json_response(201, &json!({ "data": { "secret": REPLACEMENT_SECRET } }))
+                }
+                Replacement::NoBroker => {
+                    json_response(404, &json!({ "errors": { "detail": "the machine has no broker to replace" } }))
+                }
+                Replacement::Refused => {
+                    json_response(409, &json!({ "errors": { "detail": "the machine's broker is disabled" } }))
+                }
+            };
+        }
         if url.ends_with("/api/v1/client/host-machines") && request.method == "POST" {
             let body = match &request.body {
                 Some(svartal::http::Body::Json(value)) => value.clone(),
@@ -182,6 +291,8 @@ struct Run {
     output: String,
     urls: Vec<String>,
     posted: Vec<Value>,
+    /// Every POST this run made, url only — for telling the routes apart.
+    all_posts: Vec<String>,
 }
 
 /// `HOME` and the poll interval are process environment, so the runs in this
@@ -243,7 +354,13 @@ where
             _ => None,
         })
         .collect();
-    Run { outcome, output: String::from_utf8(out).unwrap(), urls: http.urls(), posted }
+    let all_posts = http
+        .requests()
+        .into_iter()
+        .filter(|request| request.method == "POST")
+        .map(|request| request.url)
+        .collect();
+    Run { outcome, output: String::from_utf8(out).unwrap(), urls: http.urls(), posted, all_posts }
 }
 
 #[test]
@@ -382,6 +499,195 @@ fn up_waits_for_the_workspace_to_become_visible_to_your_account() {
     assert!(run.output.contains("sv envs"), "{}", run.output);
     // It kept polling, which is what asks Svartal to repair the link.
     assert_eq!(run.urls.iter().filter(|url| url.ends_with(MACHINE_ID)).count(), 2, "{:?}", run.urls);
+}
+
+/// A workspace that reads ready is not a success while the machine container
+/// this command just started keeps restart-looping on a refused bootstrap:
+/// the broker identity file never lands, every machine answer stays a 404,
+/// and the ready workspace belongs to an earlier run. `up` must keep waiting
+/// and end in an error that names the bootstrap, not a success the first
+/// `sv shell` would fall over on.
+#[test]
+fn up_does_not_call_a_workspace_ready_while_the_machine_keeps_restarting_on_bootstrap() {
+    let dir = TempDir::new("host-up-bootstrap-loop");
+    let docker = FakeDocker::new(true);
+    // `test -s broker.env` exits 1 with nothing else said, forever: the
+    // crash-loop signature on a machine whose bootstrap is refused.
+    docker.broker_env_probe_answers(
+        "svartal-host",
+        vec![DockerOutput { success: false, stdout: String::new(), stderr: String::new() }],
+    );
+    let run = run(true, &docker, vec!["ready/linked"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), None)
+    });
+    let error = run.outcome.expect_err("a crash-looping bootstrap must not end in success");
+    assert!(
+        error.0.contains("broker identity did not complete bootstrapping"),
+        "{error:?}"
+    );
+    assert!(error.0.contains("host_serving"), "the log was not shown: {error:?}");
+    assert!(
+        run.output.contains("The machine's broker identity is still bootstrapping"),
+        "{}",
+        run.output
+    );
+    assert!(!run.output.contains("sv envs"), "said success: {}", run.output);
+    assert!(!run.output.contains("Your workspace is ready."), "said ready: {}", run.output);
+}
+
+/// A first start is normally in-between for a moment: the container runs,
+/// the workspace may already read ready from an earlier run, and the broker
+/// identity lands a few polls later (a restart between attempts is waited
+/// through like any other in-between). Success comes after it lands.
+#[test]
+fn up_waits_for_the_broker_identity_to_land_before_calling_the_workspace_ready() {
+    let dir = TempDir::new("host-up-bootstrap-waits");
+    let docker = FakeDocker::new(true);
+    docker.broker_env_probe_answers(
+        "svartal-host",
+        vec![
+            DockerOutput { success: false, stdout: String::new(), stderr: String::new() },
+            DockerOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "Error response from daemon: container svartal-host is restarting".into(),
+            },
+            DockerOutput { success: true, stdout: String::new(), stderr: String::new() },
+        ],
+    );
+    let run = run(true, &docker, vec!["ready/linked"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), None)
+    });
+    run.outcome.expect("a bootstrap that lands is a success");
+    assert_eq!(
+        run.output.matches("The machine's broker identity is still bootstrapping").count(),
+        1,
+        "{}",
+        run.output
+    );
+    assert!(run.output.contains("Your workspace is ready."), "{}", run.output);
+    assert!(run.output.contains("sv envs"), "{}", run.output);
+}
+
+/// The probe itself failing is neither "bootstrapped" nor "not yet": an
+/// engine that cannot answer `docker exec` must fail the command with the
+/// engine's own words rather than wait forever or claim success.
+#[test]
+fn up_fails_when_the_bootstrap_probe_cannot_be_answered() {
+    let dir = TempDir::new("host-up-bootstrap-unreadable");
+    let docker = FakeDocker::new(true);
+    docker.broker_env_probe_answers(
+        "svartal-host",
+        vec![DockerOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: "Cannot connect to the Docker daemon".into(),
+        }],
+    );
+    let run = run(true, &docker, vec!["ready/linked"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), None)
+    });
+    let error = run.outcome.expect_err("an unreadable probe is not a success");
+    assert!(error.0.contains("could not be checked"), "{error:?}");
+    assert!(error.0.contains("Cannot connect to the Docker daemon"), "{error:?}");
+    assert!(!run.output.contains("sv envs"), "said success: {}", run.output);
+}
+
+/// A purge keeps the account registration and deletes the volumes, so the
+/// next `up` reuses the same machine with no local broker identity left.
+/// The ordinary enrollment is refused for that machine (it already has a
+/// broker), so `up` asks for the owner-authorized identity replacement after
+/// registering and starts the machine with the replacement secret.
+#[test]
+fn up_replaces_a_lost_broker_identity_when_the_registration_is_reused() {
+    let dir = TempDir::new("host-up-identity-replacement");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    let docker = FakeDocker::new(true).with_config_volume_identity(false);
+    let http = transport_replacement(fixture("oidc.json"), vec!["ready/linked"], true, Replacement::Issued);
+    let run = run_http(true, &docker, http, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), None)
+    });
+    run.outcome.expect("a replaced identity is a success");
+    assert_eq!(
+        run.all_posts.iter().filter(|url| url.ends_with("/broker-identity-replacement")).count(),
+        1,
+        "the replacement must be asked for exactly once: {:?}",
+        run.all_posts
+    );
+    let env_files = docker.env_files.lock().unwrap().clone();
+    assert!(
+        env_files[0].contains(&format!("SVARTAL_ENROLLMENT_TOKEN={REPLACEMENT_SECRET}\n")),
+        "the machine must enroll with the replacement secret: {}",
+        env_files[0]
+    );
+    assert!(!env_files[0].contains(TOKEN), "the superseded token must not reach the machine: {}", env_files[0]);
+}
+
+/// A plain `up` on a machine whose volumes (and with them the broker
+/// identity) are still there resumes the machine; the replacement must not
+/// be asked for on every start.
+#[test]
+fn up_does_not_ask_for_a_replacement_while_the_identity_is_retained() {
+    let dir = TempDir::new("host-up-identity-retained");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    let docker = FakeDocker::new(true).with_config_volume_identity(true);
+    let run = run(true, &docker, vec!["ready/linked"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), None)
+    });
+    run.outcome.expect("a resumed machine is a success");
+    assert!(
+        run.all_posts.iter().all(|url| !url.ends_with("/broker-identity-replacement")),
+        "no replacement may be requested: {:?}",
+        run.all_posts
+    );
+    let env_files = docker.env_files.lock().unwrap().clone();
+    assert!(
+        env_files[0].contains(&format!("SVARTAL_ENROLLMENT_TOKEN={TOKEN}\n")),
+        "the ordinary token is the one this machine enrolls with: {}",
+        env_files[0]
+    );
+}
+
+/// A registration with no broker on Svartal's side answers 404: the ordinary
+/// enrollment token registration just issued is the right one, and its loss
+/// would be a dead end, so the missing endpoint must not fail the start.
+#[test]
+fn up_uses_the_ordinary_token_when_svartal_has_no_broker_to_replace() {
+    let dir = TempDir::new("host-up-identity-no-broker");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    let docker = FakeDocker::new(true).with_config_volume_identity(false);
+    let http = transport_replacement(fixture("oidc.json"), vec!["ready/linked"], true, Replacement::NoBroker);
+    let run = run_http(true, &docker, http, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), None)
+    });
+    run.outcome.expect("no broker to replace is the ordinary path");
+    let env_files = docker.env_files.lock().unwrap().clone();
+    assert!(
+        env_files[0].contains(&format!("SVARTAL_ENROLLMENT_TOKEN={TOKEN}\n")),
+        "the ordinary token must carry the enrollment: {}",
+        env_files[0]
+    );
+}
+
+/// A refused replacement is a real refusal — the machine cannot enroll with
+/// either secret — so the start fails with Svartal's own words instead of
+/// starting a container that can only crash-loop.
+#[test]
+fn up_fails_with_details_when_the_replacement_is_refused() {
+    let dir = TempDir::new("host-up-identity-refused");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    let docker = FakeDocker::new(true).with_config_volume_identity(false);
+    let http = transport_replacement(fixture("oidc.json"), vec!["ready/linked"], true, Replacement::Refused);
+    let run = run_http(true, &docker, http, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, Some("img"), None)
+    });
+    let error = run.outcome.expect_err("a refused replacement is a failure");
+    assert!(error.0.contains("broker is disabled"), "{error:?}");
+    assert!(error.0.contains("replace this machine's broker identity"), "{error:?}");
+    assert!(
+        docker.env_files.lock().unwrap().is_empty(),
+        "no machine container may be started on a refused replacement"
+    );
 }
 
 /// A Svartal that never says whether the workspace is linked is the one this
@@ -921,7 +1227,9 @@ fn a_machine_registered_without_a_release_is_still_remembered_for_the_retry() {
 
 /// The everyday up: a machine whose registration never changed must not have
 /// its volumes touched at all, and after it the record says explicitly which
-/// machine the volumes speak for.
+/// machine the volumes speak for. The one exception is the read-only,
+/// no-network probe that looks for the broker identity on the config volume:
+/// it reads one file and changes nothing.
 #[test]
 fn an_up_of_an_unchanged_machine_never_touches_the_runtime_volumes() {
     let dir = TempDir::new("host-up-unchanged");
@@ -933,7 +1241,11 @@ fn an_up_of_an_unchanged_machine_never_touches_the_runtime_volumes() {
     });
     result.outcome.unwrap();
     let calls = docker.calls();
-    assert!(!calls.iter().any(|call| call.starts_with("run --rm")), "the volumes were touched: {calls:?}");
+    let one_shots: Vec<&String> = calls.iter().filter(|call| call.starts_with("run --rm")).collect();
+    assert!(
+        one_shots.iter().all(|call| call.contains("--network none") && call.contains(":ro")),
+        "a one-shot helper may only look, never touch: {calls:?}"
+    );
     assert!(!calls.iter().any(|call| call.starts_with("volume rm")), "{calls:?}");
     let record = host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).unwrap();
     assert_eq!(record.volume_identity.as_deref(), Some(MACHINE_ID));
@@ -982,6 +1294,13 @@ fn a_purge_retry_treats_volumes_already_gone_as_removed() {
     });
     second.outcome.unwrap();
     assert!(second.output.contains("volumes were deleted"), "{}", second.output);
+    // Nothing mounts the run volume by the retry, so the retry finishes its
+    // removal too — the advice to retry must be completable end to end.
+    let calls = docker.inner.calls();
+    assert!(
+        calls.iter().any(|call| call == "ps -a --filter volume=svartal-run --format {{.ID}}") && calls.iter().any(|call| call == "volume rm -f svartal-run"),
+        "{calls:?}"
+    );
     assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
 }
 
@@ -1102,5 +1421,157 @@ fn a_volume_removal_failure_is_not_reported_as_a_successful_purge() {
     });
     assert!(result.outcome.unwrap_err().to_string().contains("volume is in use"));
     assert!(!result.output.contains("volumes were deleted"));
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
+}
+
+/// The shared run volume is mounted by the very workspace containers a purge
+/// preserves, so a real engine would refuse its removal on every retry
+/// forever. The purge asks the engine first and keeps it, said out loud,
+/// while anything still mounts it.
+#[test]
+fn a_purge_keeps_the_shared_run_volume_while_workspaces_still_mount_it() {
+    let dir = TempDir::new("host-purge-run-kept");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    let docker = FakeDocker::new(true);
+    docker.already_running(host::CONTAINER_NAME);
+    docker.volume_mounted_by(host::RUN_VOLUME, "abc123\ndef456\n");
+
+    let result = run(true, &docker, vec![], true, dir.path(), |context, out, docker| {
+        commands::host_down(context, out, docker, true, None)
+    });
+    result.outcome.unwrap();
+
+    let calls = docker.calls();
+    // The identity and state volumes went; the runtime volume was probed and
+    // kept, never offered for removal.
+    assert!(calls.iter().any(|call| call == "volume rm -f svartal-host-config"), "{calls:?}");
+    assert!(calls.iter().any(|call| call == "volume rm -f svartal-host-state"), "{calls:?}");
+    assert!(
+        calls.iter().any(|call| call == "ps -a --filter volume=svartal-run --format {{.ID}}"),
+        "{calls:?}"
+    );
+    assert!(!calls.iter().any(|call| call == "volume rm -f svartal-run"), "tried to remove an in-use run volume: {calls:?}");
+
+    let output = result.output;
+    assert!(output.contains("The machine's local identity and state volumes were deleted."), "{output}");
+    assert!(
+        output.contains("The shared runtime volume svartal-run was kept because workspace containers still mount it"),
+        "{output}"
+    );
+    assert!(output.contains("account registration was kept"), "{output}");
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
+}
+
+/// With nothing mounting it — and with containers mounting an unrelated
+/// volume only — the run volume is removed like the rest.
+#[test]
+fn a_purge_removes_the_run_volume_when_nothing_mounts_it() {
+    let dir = TempDir::new("host-purge-run-removed");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    let docker = FakeDocker::new(true);
+    // Mounted, but not by the volume the purge asks about.
+    docker.volume_mounted_by("svartal-run-e2e", "ff00ff\n");
+
+    let result = run(true, &docker, vec![], true, dir.path(), |context, out, docker| {
+        commands::host_down(context, out, docker, true, None)
+    });
+    result.outcome.unwrap();
+
+    let calls = docker.calls();
+    assert!(calls.iter().any(|call| call == "volume rm -f svartal-run"), "{calls:?}");
+    assert!(
+        calls.iter().any(|call| call == "ps -a --filter volume=svartal-run --format {{.ID}}"),
+        "{calls:?}"
+    );
+    assert!(!result.output.contains("was kept because workspace containers"), "{}", result.output);
+    assert!(result.output.contains("Workspace containers and their volumes were left alone"), "{}", result.output);
+}
+
+/// A listing the engine cannot answer is a failure, never a quiet keep or a
+/// quiet removal; the error says the registration survived and to retry.
+#[test]
+fn a_purge_fails_when_the_run_volume_listing_fails() {
+    for failure in ["daemon", "transport"] {
+        let dir = TempDir::new("host-purge-probe-failed");
+        record(&dir, &host::Instance::default_instance(), "laptop");
+        struct BrokenPs<'a> {
+            inner: &'a FakeDocker,
+            failure: &'static str,
+        }
+        impl Docker for BrokenPs<'_> {
+            fn run(&self, args: &[String], stdin: Option<&[u8]>) -> Result<DockerOutput, String> {
+                if args.first().map(String::as_str) == Some("ps") {
+                    self.inner.calls.lock().unwrap().push(args.to_vec());
+                    return match self.failure {
+                        "daemon" => Ok(DockerOutput {
+                            success: false,
+                            stdout: String::new(),
+                            stderr: "Cannot connect to the Docker daemon".into(),
+                        }),
+                        _ => Err("docker did not start".to_string()),
+                    };
+                }
+                self.inner.run(args, stdin)
+            }
+        }
+        let docker = FakeDocker::new(true);
+        let broken = BrokenPs { inner: &docker, failure };
+        let result = run(true, &docker, vec![], true, dir.path(), |context, out, _| {
+            commands::host_down(context, out, &broken, true, None)
+        });
+        let error = result.outcome.unwrap_err().to_string();
+        assert!(error.contains("Could not ask the engine which containers still use the runtime volume svartal-run"), "{failure}: {error}");
+        assert!(error.contains("retry `sv host down --purge`"), "{failure}: {error}");
+        assert!(!result.output.contains("was kept because workspace containers"), "{failure}: {}", result.output);
+        assert!(!docker.calls().iter().any(|call| call == "volume rm -f svartal-run"), "{failure}");
+        assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
+    }
+}
+
+/// The partial-purge retry that ends with workspaces still mounted: the
+/// identity and state volumes finish their removal, the run volume is kept,
+/// and the retry succeeds instead of failing forever.
+#[test]
+fn a_partial_purge_retry_finishes_with_the_run_volume_kept() {
+    let dir = TempDir::new("host-purge-retry-run-kept");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    struct StateOnceBusy {
+        inner: FakeDocker,
+        state_in_use: Mutex<bool>,
+    }
+    impl Docker for StateOnceBusy {
+        fn run(&self, args: &[String], stdin: Option<&[u8]>) -> Result<DockerOutput, String> {
+            if args.first().map(String::as_str) == Some("volume")
+                && args.get(1).map(String::as_str) == Some("rm")
+                && args.last().map(String::as_str) == Some("svartal-host-state")
+                && *self.state_in_use.lock().unwrap()
+            {
+                self.inner.calls.lock().unwrap().push(args.to_vec());
+                return Ok(DockerOutput { success: false, stdout: String::new(), stderr: "volume is in use".into() });
+            }
+            self.inner.run(args, stdin)
+        }
+    }
+    let docker = StateOnceBusy { inner: FakeDocker::new(true), state_in_use: Mutex::new(true) };
+    docker.inner.volume_mounted_by(host::RUN_VOLUME, "abc123\n");
+
+    let first = run(true, &docker.inner, vec![], true, dir.path(), |context, out, _| {
+        commands::host_down(context, out, &docker, true, None)
+    });
+    assert!(first.outcome.unwrap_err().to_string().contains("volume is in use"));
+    // The run volume was never probed: the state volume failed first.
+    assert!(
+        !docker.inner.calls().iter().any(|call| call.starts_with("ps ")),
+        "{:?}",
+        docker.inner.calls()
+    );
+
+    *docker.state_in_use.lock().unwrap() = false;
+    let second = run(true, &docker.inner, vec![], true, dir.path(), |context, out, _| {
+        commands::host_down(context, out, &docker, true, None)
+    });
+    second.outcome.unwrap();
+    assert!(second.output.contains("was kept because workspace containers still mount it"), "{}", second.output);
+    assert!(!docker.inner.calls().iter().any(|call| call == "volume rm -f svartal-run"), "{:?}", docker.inner.calls());
     assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
 }
