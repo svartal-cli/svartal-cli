@@ -399,6 +399,38 @@ pub fn host_status(
     parse_registration(response, action)
 }
 
+/// A replacement broker-identity secret Svartal issued for a machine this
+/// account owns. The machine already has a broker enrolled, so the ordinary
+/// enrollment path is refused; this is the owner-authorized way to give the
+/// same machine a fresh identity after its local one was lost (a purge kept
+/// the registration but deleted the volumes that held it).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerIdentityReplacement {
+    pub secret: String,
+}
+
+/// `POST /api/v1/client/host-machines/:id/broker-identity-replacement`:
+/// re-enroll this machine's broker. Asked for only when the account
+/// registration is being reused and the local broker identity is gone.
+pub fn replace_broker_identity(
+    http: &dyn HttpTransport,
+    api_base_url: &str,
+    access_token: &str,
+    machine_id: &str,
+) -> Result<BrokerIdentityReplacement, ApiError> {
+    let action = "replace this machine's broker identity";
+    let data = send_json(
+        http,
+        Request::post(format!("{api_base_url}/api/v1/client/host-machines/{machine_id}/broker-identity-replacement"))
+            .json(json!({})),
+        access_token,
+        action,
+    )?;
+    serde_json::from_value(data.get("data").cloned().unwrap_or(Value::Null))
+        .map_err(|error| ApiError::Failed { action: action.to_string(), detail: error.to_string() })
+}
+
 // ---------------------------------------------------------------------------
 // What this computer remembers.
 
@@ -608,6 +640,120 @@ pub fn retire_stale_runtime(docker: &dyn Docker, instance: &Instance, image: &st
 pub fn volume_rm_reports_missing(stderr: &str) -> bool {
     let stderr = stderr.to_lowercase();
     stderr.contains("no such volume") || stderr.contains("volume not found")
+}
+
+/// Whether any container — running or stopped — still mounts this instance's
+/// shared run volume. Workspace containers mount it, and a purge deliberately
+/// preserves them, so when this answers yes the engine would refuse the
+/// volume's removal forever; the purge keeps the volume instead and says so.
+/// The listing itself failing (no engine, daemon error) is an error, never a
+/// quiet answer in either direction.
+pub fn run_volume_in_use(docker: &dyn Docker, instance: &Instance) -> Result<bool, String> {
+    let run_volume = instance.run_volume();
+    let listing = docker
+        .run(
+            &args(&["ps", "-a", "--filter", &format!("volume={run_volume}"), "--format", "{{.ID}}"]),
+            None,
+        )
+        .map_err(|reason| {
+            format!("Could not ask the engine which containers still use the runtime volume {run_volume}: {reason}")
+        })?;
+    if !listing.success {
+        return Err(format!(
+            "Could not ask the engine which containers still use the runtime volume {run_volume}: {}",
+            listing.stderr
+        ));
+    }
+    Ok(!listing.stdout.trim().is_empty())
+}
+
+/// The file inside the machine container that exists only once the machine's
+/// broker identity has been enrolled: `brok host serve` writes it at the end
+/// of a successful bootstrap and refuses to serve without it, so a container
+/// that keeps restart-looping on a refused bootstrap never has it. Probed
+/// with `test -s`, which answers existence and non-emptiness and nothing
+/// else — the file's contents are secrets and never leave the container.
+pub const BROKER_ENV_PATH: &str = "/etc/svartal/provider-broker/broker.env";
+
+/// The probe's `docker exec` arguments, pure so a test can pin them.
+pub fn bootstrap_probe_args(instance: &Instance) -> Vec<String> {
+    args(&["exec", &instance.container(), "test", "-s", BROKER_ENV_PATH])
+}
+
+/// What the bootstrap probe established about the machine container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerBootstrap {
+    /// The broker identity file is there: this container finished
+    /// bootstrapping as this machine.
+    Bootstrapped,
+    /// The file is not there (yet). During a first start that is the normal
+    /// in-between; on a machine whose workspace already reads ready, it is
+    /// the crash-loop signature: a restart-looping bootstrap never writes it.
+    NotYet,
+    /// The probe itself could not be answered — an engine error the caller
+    /// must not read as either of the other two.
+    Unreadable,
+}
+
+/// Interpret the probe's outcome. `test -s` failing with exit status 1 and
+/// no other complaint is the plain "not there yet" answer; a container that
+/// is momentarily between restarts is also waited through, because a
+/// bootstrap loop restarts quickly and each attempt answers the same. Only
+/// an engine that cannot answer the probe at all is `Unreadable`.
+pub fn interpret_bootstrap_probe(output: &DockerOutput) -> BrokerBootstrap {
+    if output.success {
+        return BrokerBootstrap::Bootstrapped;
+    }
+    let stderr = output.stderr.to_lowercase();
+    if stderr.trim().is_empty()
+        || stderr.contains("is not running")
+        || stderr.contains("is restarting")
+        || stderr.contains("is starting")
+        || stderr.contains("is creating")
+        || stderr.contains("is paused")
+    {
+        return BrokerBootstrap::NotYet;
+    }
+    BrokerBootstrap::Unreadable
+}
+
+/// The one-shot helper that looks for the broker identity on this
+/// instance's config volume — the same file the running-container probe
+/// reads, but this one answers before any container is started, which is
+/// exactly when `up` must decide whether the identity survived a purge.
+/// Read-only mount, no network: the helper can only answer one question
+/// about one file and cannot touch anything.
+pub fn config_volume_probe_args(instance: &Instance, image: &str) -> Vec<String> {
+    args(&[
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--entrypoint",
+        "sh",
+        "-v",
+        &format!("{}:/etc/svartal:ro", instance.config_volume()),
+        image,
+        "-c",
+        &format!("test -s {BROKER_ENV_PATH}"),
+    ])
+}
+
+/// Whether this instance's config volume still holds the machine's broker
+/// identity. The helper failing to run at all is an error; `test -s`
+/// declining is the honest "not there".
+pub fn config_volume_has_broker_identity(docker: &dyn Docker, instance: &Instance, image: &str) -> Result<bool, String> {
+    let output = docker.run(&config_volume_probe_args(instance, image), None)?;
+    if output.success {
+        Ok(true)
+    } else if output.stderr.trim().is_empty() {
+        Ok(false)
+    } else {
+        Err(format!(
+            "Could not check whether this machine's broker identity survived: {}",
+            output.stderr
+        ))
+    }
 }
 
 /// The last lines of the host container's log, for a failure message.
