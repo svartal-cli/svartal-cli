@@ -309,7 +309,7 @@ fn a_second_up_reuses_the_machine_and_replaces_the_container() {
     host::write_record(
         &dir.path().join("config"),
         &host::Instance::default_instance(),
-        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), machine_short_name: None, image: "ghcr.io/x/svartal-host:test".into() },
+        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), machine_short_name: None, image: "ghcr.io/x/svartal-host:test".into(), volume_identity: None },
     )
     .unwrap();
     let docker = FakeDocker::new(true);
@@ -470,7 +470,7 @@ fn purge_keeps_the_registration_and_the_next_up_reuses_it() {
     host::write_record(
         &dir.path().join("config"),
         &host::Instance::default_instance(),
-        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), machine_short_name: None, image: "img".into() },
+        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), machine_short_name: None, image: "img".into(), volume_identity: None },
     )
     .unwrap();
     docker.already_running(host::CONTAINER_NAME);
@@ -561,7 +561,7 @@ fn record(dir: &TempDir, instance: &host::Instance, machine_name: &str) {
     host::write_record(
         &dir.path().join("config"),
         instance,
-        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: machine_name.into(), machine_short_name: None, image: "img".into() },
+        &host::HostRecord { machine_id: MACHINE_ID.into(), machine_name: machine_name.into(), machine_short_name: None, image: "img".into(), volume_identity: None },
     )
     .unwrap();
 }
@@ -722,12 +722,13 @@ fn refusing_registration(statuses: Vec<u16>) -> FakeTransport {
 }
 
 #[test]
-fn a_missing_registration_is_replaced_once_without_erasing_runtime_volumes() {
+fn a_missing_registration_replaces_the_stale_runtime_state_without_erasing_volumes() {
     let dir = TempDir::new("host-missing-registration");
     host::write_record(&dir.path().join("config"), &host::Instance::default_instance(), &host::HostRecord {
-        machine_id: "missing-machine".into(), machine_name: "laptop".into(), machine_short_name: None, image: "img".into(),
+        machine_id: "missing-machine".into(), machine_name: "laptop".into(), machine_short_name: None, image: "img".into(), volume_identity: None,
     }).unwrap();
     let docker = FakeDocker::new(true);
+    docker.already_running(host::CONTAINER_NAME);
     let result = run_http(true, &docker, refusing_registration(vec![404]), dir.path(), |context, out, docker| {
         commands::host_up(context, out, docker, None, None, None)
     });
@@ -735,9 +736,316 @@ fn a_missing_registration_is_replaced_once_without_erasing_runtime_volumes() {
     assert_eq!(result.posted.len(), 2);
     assert_eq!(result.posted[0]["machine_id"], "missing-machine");
     assert!(result.posted[1].get("machine_id").is_none());
-    assert_eq!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).unwrap().machine_id, MACHINE_ID);
-    assert!(!docker.calls().iter().any(|call| call.starts_with("volume rm")));
     assert!(result.output.contains("registering this computer again"));
+    assert!(result.output.contains("setting that machine's saved runtime state aside"), "{}", result.output);
+    // The stale identity was set aside inside the volumes, not deleted with
+    // them: the new machine bootstraps instead of signing as the machine
+    // that vanished, and the workspace state survives to be inspected.
+    let calls = docker.calls();
+    let set_aside_at = calls.iter().position(|call| call.starts_with("run --rm --entrypoint sh")).expect("the set-aside run");
+    let set_aside = &calls[set_aside_at];
+    assert!(set_aside.contains("-v svartal-host-config:/etc/svartal"), "{set_aside}");
+    assert!(set_aside.contains("-v svartal-host-state:/var/lib/svartal"), "{set_aside}");
+    for root in ["/etc/svartal/provider-broker", "/var/lib/svartal/provider-broker", "/var/lib/svartal/ops/environment-bindings", "/var/lib/svartal/ops/workspaces"] {
+        assert!(set_aside.contains(root), "{set_aside}");
+    }
+    assert!(set_aside.contains(".stale-missing-machine"), "{set_aside}");
+    // The old container is gone before its state is moved, and the new one
+    // starts after: a running broker must not write into the directory being
+    // taken away from it.
+    let removed = calls.iter().position(|call| call == "rm -f svartal-host").expect("the old container removed");
+    let started = calls.iter().position(|call| call.starts_with("run -d")).expect("a new run");
+    assert!(removed < set_aside_at && set_aside_at < started, "{calls:?}");
+    assert!(!calls.iter().any(|call| call.starts_with("volume rm")), "{calls:?}");
+    let record = host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).unwrap();
+    assert_eq!(record.machine_id, MACHINE_ID);
+    assert_eq!(record.volume_identity.as_deref(), Some(MACHINE_ID));
+}
+
+/// The retry a person actually makes: `up` again after the replacement
+/// already happened. It must reuse the replacement machine — a fresh one
+/// would collide with its own name — and must not set anything more aside:
+/// the volumes now speak for the machine the record names.
+#[test]
+fn a_retry_after_a_replaced_registration_reuses_the_new_machine() {
+    let dir = TempDir::new("host-replaced-then-retry");
+    host::write_record(&dir.path().join("config"), &host::Instance::default_instance(), &host::HostRecord {
+        machine_id: "missing-machine".into(), machine_name: "laptop".into(), machine_short_name: None, image: "img".into(), volume_identity: None,
+    }).unwrap();
+    let docker = FakeDocker::new(true);
+    let first = run_http(true, &docker, refusing_registration(vec![404]), dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, None, None)
+    });
+    first.outcome.unwrap();
+    let set_asides = || docker.calls().iter().filter(|call| call.starts_with("run --rm --entrypoint sh")).count();
+    assert_eq!(set_asides(), 1);
+    let second = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, None, None)
+    });
+    second.outcome.unwrap();
+    assert_eq!(second.posted.len(), 1);
+    assert_eq!(second.posted[0]["machine_id"], MACHINE_ID);
+    assert_eq!(set_asides(), 1, "an unchanged machine's state was set aside again");
+    assert!(!docker.calls().iter().any(|call| call.starts_with("volume rm")));
+    let record = host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).unwrap();
+    assert_eq!(record.volume_identity.as_deref(), Some(MACHINE_ID));
+}
+
+/// A start failure after the set-aside is the retry that must not lose
+/// coherence: the record already names the new machine with its volumes
+/// prepared, so the retry reuses both instead of replacing the machine or
+/// setting the new identity aside.
+#[test]
+fn a_start_failure_after_replacement_leaves_a_state_a_retry_can_finish() {
+    let dir = TempDir::new("host-replaced-start-fails");
+    host::write_record(&dir.path().join("config"), &host::Instance::default_instance(), &host::HostRecord {
+        machine_id: "gone-machine".into(), machine_name: "laptop".into(), machine_short_name: None, image: "img".into(), volume_identity: None,
+    }).unwrap();
+    struct NoStart(FakeDocker);
+    impl Docker for NoStart {
+        fn run(&self, args: &[String], stdin: Option<&[u8]>) -> Result<DockerOutput, String> {
+            if args.first().map(String::as_str) == Some("run") && args.contains(&"-d".to_string()) {
+                self.0.calls.lock().unwrap().push(args.to_vec());
+                return Ok(DockerOutput { success: false, stdout: String::new(), stderr: "port already allocated".into() });
+            }
+            self.0.run(args, stdin)
+        }
+    }
+    let broken = NoStart(FakeDocker::new(true));
+    let first = run_http(true, &broken.0, refusing_registration(vec![404]), dir.path(), |context, out, _| {
+        commands::host_up(context, out, &broken, None, None, None)
+    });
+    let error = first.outcome.unwrap_err().to_string();
+    assert!(error.contains("Could not start the machine container"), "{error}");
+    let record = host::read_record(&dir.path().join("config"), &host::Instance::default_instance())
+        .expect("the replacement was remembered");
+    assert_eq!(record.machine_id, MACHINE_ID);
+    assert_eq!(record.volume_identity.as_deref(), Some(MACHINE_ID));
+    let docker = FakeDocker::new(true);
+    let second = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, None, None)
+    });
+    second.outcome.unwrap();
+    assert_eq!(second.posted.len(), 1);
+    assert_eq!(second.posted[0]["machine_id"], MACHINE_ID);
+    assert!(!docker.calls().iter().any(|call| call.starts_with("run --rm --entrypoint sh")), "nothing left to set aside: {:?}", docker.calls());
+}
+
+/// The window between remembering the replacement and finishing the
+/// set-aside: the record names the new machine, the volumes still speak for
+/// the old one, and the next `up` — asking for the new machine by id, no
+/// 404 in sight — has to notice and finish the recovery.
+#[test]
+fn a_record_written_before_the_set_aside_still_triggers_it_on_the_next_up() {
+    let dir = TempDir::new("host-crash-window");
+    host::write_record(&dir.path().join("config"), &host::Instance::default_instance(), &host::HostRecord {
+        machine_id: MACHINE_ID.into(), machine_name: "laptop".into(), machine_short_name: None, image: "img".into(),
+        volume_identity: Some("older-machine".into()),
+    }).unwrap();
+    let docker = FakeDocker::new(true);
+    let result = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, None, None)
+    });
+    result.outcome.unwrap();
+    assert_eq!(result.posted.len(), 1);
+    assert_eq!(result.posted[0]["machine_id"], MACHINE_ID);
+    let set_aside = docker.calls().into_iter().find(|call| call.starts_with("run --rm --entrypoint sh")).expect("the set-aside run");
+    assert!(set_aside.contains(".stale-older-machine"), "{set_aside}");
+    let record = host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).unwrap();
+    assert_eq!(record.volume_identity.as_deref(), Some(MACHINE_ID));
+}
+
+/// A set-aside that itself fails must leave the record saying the volumes
+/// still speak for the old machine, so the retry reuses the saved new
+/// machine id and finishes the recovery instead of skipping it.
+#[test]
+fn a_set_aside_failure_is_retried_with_the_saved_machine_and_old_volume_identity() {
+    let dir = TempDir::new("host-set-aside-fails");
+    host::write_record(&dir.path().join("config"), &host::Instance::default_instance(), &host::HostRecord {
+        machine_id: "gone-machine".into(), machine_name: "laptop".into(), machine_short_name: None, image: "img".into(), volume_identity: None,
+    }).unwrap();
+    struct BusyVolume(FakeDocker);
+    impl Docker for BusyVolume {
+        fn run(&self, args: &[String], stdin: Option<&[u8]>) -> Result<DockerOutput, String> {
+            if args.first().map(String::as_str) == Some("run") && args.contains(&"--entrypoint".to_string()) {
+                self.0.calls.lock().unwrap().push(args.to_vec());
+                return Ok(DockerOutput { success: false, stdout: String::new(), stderr: "device or resource busy".into() });
+            }
+            self.0.run(args, stdin)
+        }
+    }
+    let broken = BusyVolume(FakeDocker::new(true));
+    let first = run_http(true, &broken.0, refusing_registration(vec![404]), dir.path(), |context, out, _| {
+        commands::host_up(context, out, &broken, None, None, None)
+    });
+    let error = first.outcome.unwrap_err().to_string();
+    assert!(error.contains("Could not set the machine's previous runtime state aside"), "{error}");
+    assert!(error.contains("run `sv host up` again"), "{error}");
+    assert!(!first.output.contains("is running"));
+    let record = host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).unwrap();
+    assert_eq!(record.machine_id, MACHINE_ID, "the replacement must be remembered for the retry");
+    assert_eq!(record.volume_identity.as_deref(), Some("gone-machine"), "the volumes still speak for the old machine");
+    let docker = FakeDocker::new(true);
+    let second = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, None, None)
+    });
+    second.outcome.unwrap();
+    assert_eq!(second.posted.len(), 1);
+    assert_eq!(second.posted[0]["machine_id"], MACHINE_ID);
+    assert!(docker.calls().iter().any(|call| call.starts_with("run --rm --entrypoint sh")), "the retry did not finish the recovery");
+    let record = host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).unwrap();
+    assert_eq!(record.volume_identity.as_deref(), Some(MACHINE_ID));
+}
+
+/// A machine Svartal accepted but could not run (no published image yet) is
+/// still the machine this computer is: the record must exist, or the retry
+/// would register again and collide with its own name.
+#[test]
+fn a_machine_registered_without_a_release_is_still_remembered_for_the_retry() {
+    let dir = TempDir::new("host-no-release-remembered");
+    let docker = FakeDocker::new(true);
+    let first = run(true, &docker, vec![], false, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, None, None)
+    });
+    assert!(first.outcome.unwrap_err().to_string().contains("no published workspace image"));
+    let record = host::read_record(&dir.path().join("config"), &host::Instance::default_instance())
+        .expect("the registered machine was not remembered");
+    assert_eq!(record.machine_id, MACHINE_ID);
+    let second = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, None, None)
+    });
+    second.outcome.unwrap();
+    assert_eq!(second.posted.len(), 1);
+    assert_eq!(second.posted[0]["machine_id"], MACHINE_ID);
+}
+
+/// The everyday up: a machine whose registration never changed must not have
+/// its volumes touched at all, and after it the record says explicitly which
+/// machine the volumes speak for.
+#[test]
+fn an_up_of_an_unchanged_machine_never_touches_the_runtime_volumes() {
+    let dir = TempDir::new("host-up-unchanged");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    let docker = FakeDocker::new(true);
+    docker.already_running(host::CONTAINER_NAME);
+    let result = run(true, &docker, vec!["ready"], true, dir.path(), |context, out, docker| {
+        commands::host_up(context, out, docker, None, None, None)
+    });
+    result.outcome.unwrap();
+    let calls = docker.calls();
+    assert!(!calls.iter().any(|call| call.starts_with("run --rm")), "the volumes were touched: {calls:?}");
+    assert!(!calls.iter().any(|call| call.starts_with("volume rm")), "{calls:?}");
+    let record = host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).unwrap();
+    assert_eq!(record.volume_identity.as_deref(), Some(MACHINE_ID));
+}
+
+/// A partial purge leaves volumes behind; the retry must treat the ones it
+/// already removed as removed, or "retry `sv host down --purge`" is advice
+/// that cannot be followed.
+#[test]
+fn a_purge_retry_treats_volumes_already_gone_as_removed() {
+    let dir = TempDir::new("host-purge-retry");
+    record(&dir, &host::Instance::default_instance(), "laptop");
+    struct PartialPurge {
+        inner: FakeDocker,
+        state_in_use: Mutex<bool>,
+        config_gone: Mutex<bool>,
+    }
+    impl Docker for PartialPurge {
+        fn run(&self, args: &[String], stdin: Option<&[u8]>) -> Result<DockerOutput, String> {
+            if args.first().map(String::as_str) == Some("volume") && args.get(1).map(String::as_str) == Some("rm") {
+                let volume = args.last().unwrap();
+                if volume == "svartal-host-config" {
+                    let mut gone = self.config_gone.lock().unwrap();
+                    if *gone {
+                        return Ok(DockerOutput { success: false, stdout: String::new(), stderr: "Error: No such volume: svartal-host-config".into() });
+                    }
+                    *gone = true;
+                    return Ok(DockerOutput { success: true, stdout: String::new(), stderr: String::new() });
+                }
+                if volume == "svartal-host-state" && *self.state_in_use.lock().unwrap() {
+                    return Ok(DockerOutput { success: false, stdout: String::new(), stderr: "Error response from daemon: volume is in use".into() });
+                }
+            }
+            self.inner.run(args, stdin)
+        }
+    }
+    let docker = PartialPurge { inner: FakeDocker::new(true), state_in_use: Mutex::new(true), config_gone: Mutex::new(false) };
+    let first = run(true, &docker.inner, vec![], true, dir.path(), |context, out, _| {
+        commands::host_down(context, out, &docker, true, None)
+    });
+    assert!(first.outcome.unwrap_err().to_string().contains("volume is in use"));
+    // The config volume is already gone; the retry must not fail on it.
+    *docker.state_in_use.lock().unwrap() = false;
+    let second = run(true, &docker.inner, vec![], true, dir.path(), |context, out, _| {
+        commands::host_down(context, out, &docker, true, None)
+    });
+    second.outcome.unwrap();
+    assert!(second.output.contains("volumes were deleted"), "{}", second.output);
+    assert!(host::read_record(&dir.path().join("config"), &host::Instance::default_instance()).is_some());
+}
+
+/// The set-aside helper against a real engine: old broker files and ops
+/// records seeded in the volumes are moved aside — preserved, not deleted —
+/// while the registry credential, the image pin and a runner's credential
+/// home stay where they are, and running it again changes nothing. Skipped
+/// when no docker engine or registry is reachable, so the suite still runs
+/// everywhere.
+#[test]
+fn the_set_aside_helper_moves_the_stale_state_and_preserves_the_rest_in_docker() {
+    let docker = host::ProcessDocker;
+    if host::engine_ready(&docker).is_err() {
+        return;
+    }
+    let image = "alpine:3";
+    let pulled = docker.run(&["pull".to_string(), image.to_string()], None).unwrap();
+    if !pulled.success {
+        return;
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let instance = host::Instance::parse(Some(&format!("rt{nanos}"))).unwrap();
+    let run_sh = |script: &str| docker.run(&host::volume_helper_args(&instance, image, script), None).unwrap();
+    let seed = "\
+set -e
+mkdir -p /etc/svartal/provider-broker /var/lib/svartal/provider-broker \
+/var/lib/svartal/ops/environment-bindings/deployment-state /var/lib/svartal/ops/workspaces/ws-1 \
+/var/lib/svartal/user-volumes/runner-7 /etc/svartal/docker
+echo broker-env >/etc/svartal/provider-broker/broker.env
+echo workspace-map >/var/lib/svartal/provider-broker/workspaces.json
+echo binding >/var/lib/svartal/ops/environment-bindings/11111111-2222-4333-8444-555555555555.json
+echo journal >/var/lib/svartal/ops/environment-bindings/deployment-state/dep-1.json
+echo ops-material >/var/lib/svartal/ops/workspaces/ws-1/material
+echo image-pin >/var/lib/svartal/ops/current-environment-image
+echo runner-credentials >/var/lib/svartal/user-volumes/runner-7/creds
+echo registry-auth >/etc/svartal/docker/config.json
+";
+    let seeded = run_sh(seed);
+    assert!(seeded.success, "seeding the volumes failed: {}", seeded.stderr);
+    host::retire_stale_runtime(&docker, &instance, image, "old-machine").expect("the set-aside");
+    let check = |script: &str| run_sh(script).success;
+    let read = |path: &str| run_sh(&format!("cat {path}")).stdout.trim().to_string();
+    // The stale identity and ops records are no longer in place…
+    assert!(check("test ! -e /etc/svartal/provider-broker"));
+    assert!(check("test ! -e /var/lib/svartal/provider-broker"));
+    assert!(check("test ! -e /var/lib/svartal/ops/environment-bindings"));
+    assert!(check("test ! -e /var/lib/svartal/ops/workspaces"));
+    // …and survive, contents intact, under the stale name.
+    assert_eq!(read("/etc/svartal/provider-broker.stale-old-machine/broker.env"), "broker-env");
+    assert_eq!(read("/var/lib/svartal/provider-broker.stale-old-machine/workspaces.json"), "workspace-map");
+    assert_eq!(read("/var/lib/svartal/ops/environment-bindings.stale-old-machine/11111111-2222-4333-8444-555555555555.json"), "binding");
+    assert_eq!(read("/var/lib/svartal/ops/environment-bindings.stale-old-machine/deployment-state/dep-1.json"), "journal");
+    assert_eq!(read("/var/lib/svartal/ops/workspaces.stale-old-machine/ws-1/material"), "ops-material");
+    // The machine-agnostic state is untouched.
+    assert_eq!(read("/var/lib/svartal/ops/current-environment-image"), "image-pin");
+    assert_eq!(read("/var/lib/svartal/user-volumes/runner-7/creds"), "runner-credentials");
+    assert_eq!(read("/etc/svartal/docker/config.json"), "registry-auth");
+    // Running it again is a no-op, not a second backup.
+    host::retire_stale_runtime(&docker, &instance, image, "old-machine").expect("the set-aside again");
+    assert!(check("test \"$(ls -1 /etc/svartal | grep -c '^provider-broker\\.stale-old-machine')\" = 1"));
+    assert!(check("test \"$(ls -1 /var/lib/svartal/ops | grep -c 'stale-old-machine$')\" = 2"));
+    assert!(check("test \"$(ls -1 /var/lib/svartal | grep -c 'stale-old-machine$')\" = 1"));
+    let _ = docker.run(&["volume".to_string(), "rm".to_string(), "-f".to_string(), instance.config_volume()], None);
+    let _ = docker.run(&["volume".to_string(), "rm".to_string(), "-f".to_string(), instance.state_volume()], None);
 }
 
 #[test]

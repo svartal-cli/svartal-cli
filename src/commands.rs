@@ -1158,6 +1158,14 @@ pub fn host_up(
     crate::swap::preflight(out, crate::terminal::is_interactive());
     let state = context.config.state_directory.clone();
     let existing = host::read_record(&state, &instance);
+    // The machine the runtime volumes' broker identity speaks for, when this
+    // computer has a record at all. A record from before identities were
+    // tracked speaks for its own machine id — the machine that bootstrapped
+    // those volumes — so an unchanged machine is never touched, only a
+    // replaced one.
+    let volumes_belong_to = existing
+        .as_ref()
+        .map(|record| record.volume_identity.clone().unwrap_or_else(|| record.machine_id.clone()));
     let image = image_override
         .map(str::to_string)
         .or_else(|| std::env::var(host::HOST_IMAGE_ENV).ok().filter(|value| !value.trim().is_empty()))
@@ -1206,6 +1214,27 @@ pub fn host_up(
         }
         result => result,
     }.map_err(CliError::of)?;
+    // The machine exists on the account from this moment on, whatever happens
+    // to the container next. A record that still named the previous machine
+    // would send the next `up` into the same 404 and a fresh registration
+    // that collides with this one's name, so remember a machine Svartal just
+    // created before anything else can fail. The runtime volumes still speak
+    // for the machine they were prepared for, and the record says so until
+    // they have been seen to below.
+    if existing.as_ref().map(|record| record.machine_id.as_str()) != Some(registration.machine.id.as_str()) {
+        host::write_record(
+            &state,
+            &instance,
+            &host::HostRecord {
+                machine_id: registration.machine.id.clone(),
+                machine_name: registration.machine.name.clone(),
+                machine_short_name: registration.machine.short_name.clone(),
+                image: image.clone(),
+                volume_identity: volumes_belong_to.clone(),
+            },
+        )
+        .map_err(CliError)?;
+    }
     let token = registration
         .enrollment_token
         .clone()
@@ -1221,6 +1250,35 @@ pub fn host_up(
         if !removed.success {
             return Err(CliError(format!("Could not replace the running machine container: {}", removed.stderr)));
         }
+    }
+
+    // A machine whose registration was replaced must not boot against the
+    // previous machine's runtime state: `broker.env` on the config volume
+    // ignores the fresh enrollment token, the broker signs as a machine
+    // Svartal no longer knows, and every answer is the same 404 this run
+    // just recovered from. That state is set aside inside the volumes —
+    // nothing is deleted, and the workspace containers and volumes the
+    // machine created are not touched.
+    if volumes_belong_to.as_deref().is_some_and(|stale| stale != registration.machine.id) {
+        let stale = volumes_belong_to.clone().unwrap_or_default();
+        writeln!(out, "This machine replaces the registration of {stale}; setting that machine's saved runtime state aside…").ok();
+        host::retire_stale_runtime(docker, &instance, &image, &stale).map_err(CliError)?;
+        // Before the container starts, not after: from here on the volumes
+        // are the new machine's, and a retry after a failed start must
+        // treat them that way — setting aside again would discard the
+        // identity the new machine may already have bootstrapped.
+        host::write_record(
+            &state,
+            &instance,
+            &host::HostRecord {
+                machine_id: registration.machine.id.clone(),
+                machine_name: name.clone(),
+                machine_short_name: registration.machine.short_name.clone(),
+                image: image.clone(),
+                volume_identity: Some(registration.machine.id.clone()),
+            },
+        )
+        .map_err(CliError)?;
     }
 
     let plan = host::HostPlan {
@@ -1251,6 +1309,7 @@ pub fn host_up(
             machine_name: name.clone(),
             machine_short_name: registration.machine.short_name.clone(),
             image: image.clone(),
+            volume_identity: Some(registration.machine.id.clone()),
         },
     )
     .map_err(CliError)?;
@@ -1414,7 +1473,9 @@ pub fn host_down(
     if purge {
         for volume in [instance.config_volume(), instance.state_volume(), instance.run_volume()] {
             let removed = docker.run(&["volume".to_string(), "rm".to_string(), "-f".to_string(), volume.clone()], None).map_err(CliError)?;
-            if !removed.success {
+            // A volume an earlier purge already removed is done, not failed:
+            // the retry this message points at must be able to finish.
+            if !removed.success && !host::volume_rm_reports_missing(&removed.stderr) {
                 return Err(CliError(format!("Could not remove machine volume {volume}: {}. The account registration was kept; retry `sv host down --purge`.", removed.stderr.trim())));
             }
         }

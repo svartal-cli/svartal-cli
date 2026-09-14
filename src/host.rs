@@ -413,6 +413,14 @@ pub struct HostRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_short_name: Option<String>,
     pub image: String,
+    /// The machine the runtime volumes' broker identity speaks for, when this
+    /// computer knows: `up` compares it with the machine it is about to
+    /// start, and a machine whose registration was replaced gets the previous
+    /// identity set aside rather than booted against. Absent from a record
+    /// written before identities were tracked, which reads as "the machine in
+    /// `machine_id`" — the one that bootstrapped those volumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_identity: Option<String>,
 }
 
 pub fn read_record(state_directory: &Path, instance: &Instance) -> Option<HostRecord> {
@@ -521,6 +529,85 @@ pub fn install_registry_auth(docker: &dyn Docker, instance: &Instance, image: &s
     } else {
         Err(format!("Could not store the registry credential for the machine: {}", output.stderr))
     }
+}
+
+/// The helper run that executes `script` with the config and state volumes
+/// mounted where the machine container mounts them — the door
+/// `retire_stale_runtime` moves stale state aside through, exposed so the
+/// tests can seed and inspect those volumes the same way.
+pub fn volume_helper_args(instance: &Instance, image: &str, script: &str) -> Vec<String> {
+    args(&[
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        "-v",
+        &format!("{}:/etc/svartal", instance.config_volume()),
+        "-v",
+        &format!("{}:/var/lib/svartal", instance.state_volume()),
+        image,
+        "-c",
+        script,
+    ])
+}
+
+/// Set the previous machine's runtime state aside when its registration was
+/// replaced. That state lives in four directories: the broker identity on
+/// the config volume (`provider-broker` — `broker.env`, the signing keys),
+/// its workspace map on the state volume, and the machine's ops records
+/// (`ops/environment-bindings`, which also holds the `deployment-state`
+/// journals, and `ops/workspaces`). All of it outlives the server's memory
+/// of the machine it answers to: a container started against the old
+/// `broker.env` ignores the fresh enrollment token and signs as a machine
+/// Svartal never heard of — the same 404 `up` just recovered from, forever —
+/// and the old bindings still get scanned into the new machine's inventory.
+/// The directories are moved aside *inside* their volumes, never deleted,
+/// and everything around them stays exactly where it is: the registry
+/// credential (`/etc/svartal/docker`), the runners' credential homes
+/// (`user-volumes`), the image pins (`ops/current-environment-image`,
+/// `ops/runner-image`), and every workspace container and volume the machine
+/// created. Nothing to move is a success, which is what a retry after a
+/// half-finished recovery needs. The run volume is left alone: it holds
+/// sockets, and the broker unlinks a stale one before binding its own.
+pub fn retire_stale_runtime(docker: &dyn Docker, instance: &Instance, image: &str, stale_machine_id: &str) -> Result<(), String> {
+    let stamp: String = stale_machine_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .take(24)
+        .collect();
+    let stamp = if stamp.is_empty() { "previous".to_string() } else { stamp };
+    let script = format!(
+        concat!(
+            "set -e\n",
+            "for root in /etc/svartal/provider-broker /var/lib/svartal/provider-broker",
+            " /var/lib/svartal/ops/environment-bindings /var/lib/svartal/ops/workspaces; do\n",
+            "  if [ -e \"$root\" ]; then\n",
+            "    keep=\"$root.stale-{STAMP}\"\n",
+            "    n=1\n",
+            "    while [ -e \"$keep\" ]; do keep=\"$root.stale-{STAMP}-$n\"; n=$((n+1)); done\n",
+            "    mv \"$root\" \"$keep\"\n",
+            "  fi\n",
+            "done\n",
+        ),
+        STAMP = stamp,
+    );
+    let output = docker.run(&volume_helper_args(instance, image, &script), None)?;
+    if output.success {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not set the machine's previous runtime state aside: {}. The machine was registered again; fix the cause and run `sv host up` again.",
+            output.stderr
+        ))
+    }
+}
+
+/// Whether `docker volume rm` failed because the volume is not there — the
+/// answer a retry after a partial purge gets. A missing volume is already as
+/// removed as it can be, so that retry must not fail on it.
+pub fn volume_rm_reports_missing(stderr: &str) -> bool {
+    let stderr = stderr.to_lowercase();
+    stderr.contains("no such volume") || stderr.contains("volume not found")
 }
 
 /// The last lines of the host container's log, for a failure message.
