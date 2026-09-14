@@ -189,7 +189,15 @@ The enrollment token never appears on a command line: it goes into a private
 `--env-file` the docker client reads, deleted as soon as the container has
 started. `sv host status` shows the container and the workspace state;
 `sv host down` stops hosting and keeps the machine's identity so `up` resumes
-it; `--purge` deletes it.
+it; `--purge` deletes the local identity and runtime state, while keeping the
+account registration so the next `up` re-enrolls the same machine — a volume
+an earlier purge already removed counts as removed, so the retry finishes.
+When Svartal no longer knows a machine (its data was rebuilt, say), `up`
+registers the computer again and sets the old machine's runtime state — its
+broker identity, workspace map, deployment bindings and journals — aside
+inside the volumes: kept, never deleted, so the new machine bootstraps
+instead of answering 404 forever. Workspace containers and their volumes are
+never touched.
 
 One computer can host more than one machine, which is how cross-machine
 behaviour is tried out without a second computer. `sv host up --instance m3b`
