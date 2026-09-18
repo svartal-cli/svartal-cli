@@ -37,6 +37,8 @@ the source comments (`ID-9`, `ID-16`, `ID-25`, …) are that document's.
 | `add [pairing-url]`   | With a pairing URL: link the machine you run it on to your account, from the single-use URL its environment server prints at startup. Without one: how to connect a new machine, and the two safe ways to hand it a token. `--json`, `--origin`, `--publish-only`, `--print-token`, `--token-file` |
 | `name`                | Give a workspace a short word to type; `--remove` forgets one          |
 | `host up\|status\|down` | This computer as a Svartal machine: `up` registers it, starts the machine container (brok's host mode) and waits for your workspace; `status` and `down` do what they say; more than one machine can run on the same computer, one per `--instance`; `--image`, `--instance`, `--purge` |
+| `open-url <url>`     | macOS: handle an `sv://` link — validate it strictly and open a Terminal running `sv shell <id>`. The Svartal app runs this, not you; off macOS it is refused |
+| `browser install\|status\|uninstall` | macOS: the Svartal app that claims the `sv://` scheme, so the web app's open-shell buttons reach this machine. `--app-path` names a package-manager-owned `.app` instead of `~/Applications/Svartal CLI.app` |
 | bare `sv`             | On a terminal: the environment list, arrow keys, enter opens a shell. Off a terminal it prints the usage and exits 1 |
 
 `claude` has been run against a live workspace: an interactive Claude terminal
@@ -61,6 +63,18 @@ because they still say why the code is shaped the way it is:
   command exits 1.
 
 ## Install
+
+With Homebrew (macOS and Linux):
+
+```sh
+brew install svartal-cli/tap/sv
+brew upgrade sv        # on macOS, also refreshes the sv:// handler app
+```
+
+The macOS formula registers the `sv://` handler app automatically after
+install and upgrade; `sv login` keeps it fresh from then on.
+
+From source:
 
 ```sh
 cargo build --release
@@ -95,8 +109,33 @@ sv ssh-setup web    # then: ssh svartal-web, or open it in a local editor
 sv machines
 sv machines --all   # including personal workspaces other people own on them
 sv sessions workbench
+sv browser status   # the sv:// handler app (macOS)
 sv logout
 ```
+
+## sv:// links from the web app
+
+The Svartal web app's open-shell buttons hand the browser
+`sv://shell?environmentId=<id>` — the id of one of your workspaces and nothing
+else: no command, no origin, no token. On macOS, `sv browser install` builds a
+small owned AppleScript app at `~/Applications/Svartal CLI.app` that claims the
+`sv` scheme (compiled with the system `osacompile`, re-stamped with a stable
+bundle id, re-signed, then registered with LaunchServices). A link makes that
+app run `sv open-url`, which validates the URL strictly and opens a Terminal
+window via a one-shot `.command` file that deletes itself and then runs
+`sv shell <id>`. A successful interactive `sv login` installs or refreshes the
+app best effort, and says how to retry rather than fail the login.
+
+`sv browser uninstall` removes exactly that app (an app without sv's ownership
+marker is never touched); `--app-path` points the verbs at a package-manager
+install instead — Homebrew's formula runs
+`"#{opt_bin}/sv" browser install --app-path "#{opt_prefix}/Svartal CLI.app"`
+after installing `sv` (the opt prefix is stable across upgrades, and the
+sandboxed post-install may write the Cellar but not the user's home, so no
+`~/Applications` fallback is read for an explicit `--app-path`). When such an
+owned handler sits beside this `sv`, the bare verbs and `sv login` defer to it.
+Off macOS both commands are explicitly unsupported; `sv shell <id>` is the same
+job.
 
 Running `sv` with no command on a terminal shows the environments and connects
 a shell to the one you pick. Up and down (or `j` and `k`) move, enter connects,

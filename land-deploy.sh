@@ -114,22 +114,7 @@ else
   echo "Updating the Homebrew formula to sv $version..."
   gh release download --repo svartal-cli/svartal-cli "$tag" --pattern "*.sha256" --dir "$work/shas"
   gh repo clone "$tap" "$work/tap" -- -q
-  python3 - "$work/tap/Formula/sv.rb" "$version" "$work/shas" <<'PY'
-import pathlib
-import re
-import sys
-
-path, version, shas = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
-formula = path.read_text(encoding="utf-8")
-formula = re.sub(r'version "[^"]*"', f'version "{version}"', formula, count=1)
-for target in ("aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"):
-    sha = (shas / f"sv-v{version}-{target}.sha256").read_text().split()[0]
-    pattern = rf'(sv-v#\{{version\}}-{re.escape(target)}\.tar\.gz"\n\s*sha256 ")[0-9a-f]{{64}}'
-    formula, count = re.subn(pattern, rf"\g<1>{sha}", formula, count=1)
-    if count != 1:
-        raise SystemExit(f"deploy-svartal-cli: could not update the {target} checksum in Formula/sv.rb")
-path.write_text(formula, encoding="utf-8")
-PY
+  python3 "$repo/scripts/update_homebrew_formula.py" "$work/tap/Formula/sv.rb" "$version" "$work/shas"
   git -C "$work/tap" add Formula/sv.rb
   git -C "$work/tap" -c user.name="sv-release" -c user.email="release@svartal.com" commit -q -m "sv $version"
   git -C "$work/tap" push -q origin HEAD:main
