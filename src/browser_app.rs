@@ -69,33 +69,54 @@ pub fn default_app_in(home: &Path) -> PathBuf {
 
 /// Where a package manager's `sv` has its app: two levels up from the
 /// executable (`…/bin/sv` → `…/`), which is the prefix beside it — Homebrew's
-/// `opt_prefix`, stable across upgrades.
+/// `opt_prefix`, stable across upgrades. The executable is canonicalized
+/// first: `current_exe` reports the path as invoked, so `/opt/homebrew/bin/sv`
+/// — a symlink — would otherwise name `/opt/homebrew` instead of the Cellar
+/// prefix it points into.
 pub fn package_app_path() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
+    package_app_path_from(std::env::current_exe().ok()?.as_path())
+}
+
+/// The rule, with the executable passed in so a test can state it.
+pub fn package_app_path_from(executable: &Path) -> Option<PathBuf> {
+    let executable = std::fs::canonicalize(executable).ok()?;
     Some(executable.parent()?.parent()?.join(APP_NAME))
 }
 
-/// The app the bare `sv browser` verbs act on, with the candidates a test
-/// can state: the package handler when this `sv` has an owned one beside it
-/// (a Homebrew `sv` must report and uninstall the app its formula owns, not
-/// claim nothing is installed), else the user's `~/Applications` app.
+/// The cask-installed app: `/Applications`.
+pub fn system_app_path() -> PathBuf {
+    PathBuf::from("/Applications").join(APP_NAME)
+}
+
+/// Every handler location, best first: the cask's app in `/Applications`, the
+/// user's in `~/Applications`, then the legacy package app beside the
+/// executable.
+fn handler_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![system_app_path()];
+    candidates.extend(default_app_path());
+    candidates.extend(package_app_path());
+    candidates
+}
+
+/// The first owned handler among `candidates`, else the target a fresh
+/// install should use. Pure over its inputs so a test can state them.
 pub fn resolve_default_app_from(
-    package_app: Option<&Path>,
-    home: Option<&Path>,
+    candidates: &[&Path],
+    install_target: Option<&Path>,
 ) -> Option<PathBuf> {
-    if let Some(app) = package_app
-        && is_owned_handler(app)
-    {
-        return Some(app.to_path_buf());
-    }
-    home.map(default_app_in)
+    candidates
+        .iter()
+        .copied()
+        .find(|app| is_owned_handler(app))
+        .map(Path::to_path_buf)
+        .or_else(|| install_target.map(Path::to_path_buf))
 }
 
 fn resolved_default_app() -> Option<PathBuf> {
-    resolve_default_app_from(
-        package_app_path().as_deref(),
-        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
-    )
+    let candidates = handler_candidates();
+    let referenced: Vec<&Path> = candidates.iter().map(|app| app.as_path()).collect();
+    let install_target = default_app_path().or_else(package_app_path);
+    resolve_default_app_from(&referenced, install_target.as_deref())
 }
 
 /// The `sv` the app should call, recorded at build time.
@@ -157,12 +178,16 @@ pub fn is_owned_handler(app: &Path) -> bool {
     app.is_dir() && owned_marker(app).is_some() && plist_has_scheme(app)
 }
 
-/// Ours, and built for this very `sv`.
-fn handler_is_fresh(app: &Path, binary: &str) -> bool {
-    match owned_marker(app) {
-        Some(marker) => marker == binary && Path::new(&marker).exists(),
-        None => false,
-    }
+/// Ours, and still usable: the marker names an executable that is still
+/// there.
+///
+/// It need not be *this* sv. A cask's app runs the matching-version CLI the
+/// cask keeps in its caskroom, and that CLI outlives upgrades of every other
+/// installed sv — so an ordinary `sv login` from any of those leaves a
+/// working cask handler alone. Only a handler whose recorded executable is
+/// gone (the old Cellar vanished underneath it) is broken enough to rebuild.
+fn handler_is_usable(app: &Path) -> bool {
+    owned_marker(app).is_some_and(|marker| Path::new(&marker).is_file())
 }
 
 /// AppleScript string-literal quoting: backslashes and double quotes.
@@ -284,24 +309,60 @@ pub fn install(
     app: &Path,
     binary: &str,
 ) -> Result<InstallChange, BrowserAppError> {
-    let change = if app.is_dir() {
+    let change = replace_owned_app(app)?;
+    build_app(runner, app, binary).map(|()| change)?;
+    let app_text = app.display().to_string();
+    let registered = runner
+        .run(LSREGISTER, &["-f", &app_text])
+        .map_err(|detail| {
+            BrowserAppError(format!(
+                "could not register the Svartal app at {app_text} ({detail})"
+            ))
+        })?;
+    if !registered.success {
+        let detail = if registered.stderr.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", registered.stderr)
+        };
+        // The app is complete and owned on disk; removing it would be worse
+        // than leaving it, so this says how to finish the job instead.
+        return Err(BrowserAppError(format!(
+            "the Svartal app is in place at {app_text} but macOS did not register it{detail}. Run `sv browser install` again."
+        )));
+    }
+    Ok(change)
+}
+
+/// `sv browser build`: compile the handler app and stop. No LaunchServices:
+/// a cask's preflight builds the app where the cask wants it, and the cask's
+/// own app artifact carries it to `/Applications`, where macOS registers it
+/// without any brew-run tool.
+pub fn build(
+    runner: &dyn ProcessRunner,
+    app: &Path,
+    binary: &str,
+) -> Result<InstallChange, BrowserAppError> {
+    let change = replace_owned_app(app)?;
+    build_app(runner, app, binary).map(|()| change)
+}
+
+/// An owned app is replaced (this is the update path); a foreign one is
+/// refused; anything else is a fresh build.
+fn replace_owned_app(app: &Path) -> Result<InstallChange, BrowserAppError> {
+    if app.is_dir() {
         if owned_marker(app).is_none() {
             return Err(foreign_app(app));
         }
         std::fs::remove_dir_all(app)
             .map_err(|error| io_error("could not replace the old app", error))?;
-        InstallChange::Replaced
+        Ok(InstallChange::Replaced)
     } else {
-        InstallChange::Created
-    };
-    install_fresh(runner, app, binary).map(|()| change)
+        Ok(InstallChange::Created)
+    }
 }
 
-fn install_fresh(
-    runner: &dyn ProcessRunner,
-    app: &Path,
-    binary: &str,
-) -> Result<(), BrowserAppError> {
+fn build_app(runner: &dyn ProcessRunner, app: &Path, binary: &str) -> Result<(), BrowserAppError> {
     let built = |step: &str| {
         BrowserAppError(format!(
             "could not {step} the Svartal app at {}",
@@ -379,21 +440,6 @@ fn install_fresh(
         return Err(give_up(BrowserAppError(format!(
             "codesign could not re-sign the Svartal app at {app_text}{detail}"
         ))));
-    }
-    let registered = runner
-        .run(LSREGISTER, &["-f", &app_text])
-        .map_err(|detail| give_up(built(&format!("register ({detail})"))))?;
-    if !registered.success {
-        let detail = if registered.stderr.is_empty() {
-            String::new()
-        } else {
-            format!(": {}", registered.stderr)
-        };
-        // The app is complete and owned on disk; removing it would be worse
-        // than leaving it, so this says how to finish the job instead.
-        return Err(BrowserAppError(format!(
-            "the Svartal app is in place at {app_text} but macOS did not register it{detail}. Run `sv browser install` again."
-        )));
     }
     Ok(())
 }
@@ -481,32 +527,57 @@ pub fn status(out: &mut dyn Write, app: &Path) -> Result<(), BrowserAppError> {
     Ok(())
 }
 
-/// `sv browser install|status|uninstall [--app-path <absolute .app path>]`.
+/// `sv browser install|build|status|uninstall` with their options.
 ///
-/// With `--app-path` no HOME is read: a package manager's post-install step
-/// names where the app goes and the sandbox it runs in may not look at the
-/// user's home at all. Without it, the verbs act on the app this `sv` uses:
-/// the package manager's when there is an owned one beside the executable,
-/// else the user's.
+/// `--app-path` and `--client` name absolute paths, so an explicit build or
+/// install reads no HOME, no account and no network. Without `--app-path`
+/// the verbs act on the first handler this `sv` can vouch for: the cask's
+/// app in `/Applications`, the user's in `~/Applications`, then the legacy
+/// package app beside the executable.
 pub fn browser_command(
     out: &mut dyn Write,
     verb: Option<&str>,
     app_path: Option<&str>,
+    client: Option<&str>,
 ) -> Result<(), BrowserAppError> {
     if !cfg!(target_os = "macos") {
         return Err(BrowserAppError(
             "The Svartal app that handles sv:// links is a macOS feature; there is nothing to install here.".to_string(),
         ));
     }
-    let app = match app_path {
-        Some(path) => {
-            let path = Path::new(path);
-            if !path.is_absolute() || path.extension().is_none_or(|extension| extension != "app") {
+    let verb = verb.ok_or_else(|| {
+        BrowserAppError("`sv browser` needs one of: install, build, status, uninstall.".to_string())
+    })?;
+    // `--client` is the installer's way of naming the `sv` the app will run;
+    // every other verb picks that itself.
+    let client = match client {
+        Some(client) if verb == "build" => {
+            let path = Path::new(client);
+            if !path.is_absolute() || !path.is_file() {
                 return Err(BrowserAppError(
-                    "--app-path needs an absolute path to the .app bundle, like /opt/homebrew/opt/svartal-cli/Svartal CLI.app.".to_string(),
+                    "--client needs the absolute path of an existing sv, like /opt/homebrew/bin/sv.".to_string(),
                 ));
             }
-            path.to_path_buf()
+            Some(client)
+        }
+        Some(_) => {
+            return Err(BrowserAppError(
+                "--client is a `sv browser build` option; the other verbs use this sv.".to_string(),
+            ));
+        }
+        None if verb == "build" => {
+            return Err(BrowserAppError(
+                "`sv browser build` needs --client <absolute path to sv>, and --app-path for the app it builds.".to_string(),
+            ));
+        }
+        None => None,
+    };
+    let app = match app_path {
+        Some(path) => app_path_bundle(path)?,
+        None if verb == "build" => {
+            return Err(BrowserAppError(
+                "`sv browser build` needs --app-path <absolute .app>, the path the package installs the app at.".to_string(),
+            ));
         }
         None => resolved_default_app().ok_or_else(|| {
             BrowserAppError("this account has no home directory, so there is nowhere for the default Svartal app. Pass --app-path.".to_string())
@@ -514,24 +585,34 @@ pub fn browser_command(
     };
     let runner = crate::proc::SystemRunner;
     match verb {
-        Some("install") => {
+        "install" => {
             let binary = helper_binary_path();
-            match install(&runner, &app, &binary)? {
-                InstallChange::Created => writeln!(
-                    out,
-                    "Installed the Svartal app at {}. sv:// links now open a Terminal running {binary}.",
-                    app.display()
-                ),
-                InstallChange::Replaced => writeln!(
-                    out,
-                    "Updated the Svartal app at {}. sv:// links now open a Terminal running {binary}.",
-                    app.display()
-                ),
-            }
+            let what = match install(&runner, &app, &binary)? {
+                InstallChange::Created => "Installed",
+                InstallChange::Replaced => "Updated",
+            };
+            writeln!(
+                out,
+                "{what} the Svartal app at {}. sv:// links now open a Terminal running {binary}.",
+                app.display()
+            )
             .ok();
         }
-        Some("status") => status(out, &app)?,
-        Some("uninstall") => match uninstall(&runner, &app)? {
+        "build" => {
+            let client = client.expect("validated above");
+            let what = match build(&runner, &app, client)? {
+                InstallChange::Created => "Built",
+                InstallChange::Replaced => "Rebuilt",
+            };
+            writeln!(
+                out,
+                "{what} the Svartal app at {}. It opens sv:// links with {client}; the package asked for it registers it.",
+                app.display()
+            )
+            .ok();
+        }
+        "status" => status(out, &app)?,
+        "uninstall" => match uninstall(&runner, &app)? {
             UninstallChange::Removed { note } => {
                 writeln!(out, "Removed the Svartal app at {}.", app.display()).ok();
                 if let Some(note) = note {
@@ -542,45 +623,60 @@ pub fn browser_command(
                 writeln!(out, "There was no Svartal app at {}.", app.display()).ok();
             }
         },
-        Some(other) => {
+        other => {
             return Err(BrowserAppError(format!(
-                "`sv browser {other}` is not a thing sv can do. It is `sv browser install`, `sv browser status` or `sv browser uninstall`."
+                "`sv browser {other}` is not a thing sv can do. It is `sv browser install`, `sv browser build`, `sv browser status` or `sv browser uninstall`."
             )));
-        }
-        None => {
-            return Err(BrowserAppError(
-                "`sv browser` needs one of: install, status, uninstall.".to_string(),
-            ));
         }
     }
     Ok(())
+}
+
+/// `--app-path`'s rule: an absolute path to an `.app` bundle.
+fn app_path_bundle(path: &str) -> Result<PathBuf, BrowserAppError> {
+    let path = Path::new(path);
+    if !path.is_absolute() || path.extension().is_none_or(|extension| extension != "app") {
+        return Err(BrowserAppError(
+            "--app-path needs an absolute path to the .app bundle, like /opt/homebrew/opt/svartal-cli/Svartal CLI.app.".to_string(),
+        ));
+    }
+    Ok(path.to_path_buf())
 }
 
 /// After a successful interactive `sv login`, make sure `sv://` links reach
 /// this `sv`. Best effort: the worst outcome is a warning, never a failed
 /// login and never extra setup the person has to paste.
 ///
-/// A package manager may already have installed a handler beside this `sv`
-/// (`…/bin/sv` → `…/Svartal CLI.app`); that one is refreshed by the same
-/// package manager on upgrade, so this leaves it strictly alone rather than
-/// install a second app to compete with it.
+/// One handler is enough. The first owned app the candidates offer is the
+/// one this keeps — fresh, it is left entirely alone (a cask's app is
+/// refreshed by its package, not by a login); stale, it is rebuilt in place
+/// rather than joined by a second app competing for the scheme.
 pub fn ensure_registered_after_login(out: &mut dyn Write) {
     if !cfg!(target_os = "macos") {
         return;
     }
-    if let Some(package_app) = package_app_path()
-        && is_owned_handler(&package_app)
-    {
+    let binary = helper_binary_path();
+    for candidate in handler_candidates() {
+        if !is_owned_handler(&candidate) {
+            continue;
+        }
+        if handler_is_usable(&candidate) {
+            return;
+        }
+        report_after_login(
+            out,
+            install(&crate::proc::SystemRunner, &candidate, &binary),
+        );
         return;
     }
-    let Some(app) = default_app_path() else {
+    let Some(app) = default_app_path().or_else(package_app_path) else {
         return;
     };
-    let binary = helper_binary_path();
-    if handler_is_fresh(&app, &binary) {
-        return;
-    }
-    match install(&crate::proc::SystemRunner, &app, &binary) {
+    report_after_login(out, install(&crate::proc::SystemRunner, &app, &binary));
+}
+
+fn report_after_login(out: &mut dyn Write, outcome: Result<InstallChange, BrowserAppError>) {
+    match outcome {
         Ok(_) => {
             writeln!(
                 out,
@@ -689,33 +785,107 @@ mod tests {
     }
 
     #[test]
-    fn the_default_prefers_an_owned_package_handler_over_the_users_app() {
+    fn the_default_finds_the_cask_app_then_the_users_then_the_package_app() {
         let root = std::env::temp_dir().join(format!(
             "sv-browser-resolve-{}-{}",
             std::process::id(),
             crate::fsutil::random_suffix().expect("a suffix")
         ));
         std::fs::create_dir_all(&root).expect("scratch directory");
-        let owned_package = root.join("owned/Svartal CLI.app");
-        make_owned_app_for_test(&owned_package, "/opt/homebrew/bin/sv");
-        let foreign_package = root.join("foreign/Svartal CLI.app");
-        std::fs::create_dir_all(foreign_package.join("Contents/MacOS")).expect("bundle");
-        let home = root.join("home");
-        let user_app = home.join("Applications/Svartal CLI.app");
+        let cask_app = root.join("cask/Svartal CLI.app");
+        let user_app = root.join("home/Applications/Svartal CLI.app");
+        let package_app = root.join("package/Svartal CLI.app");
+        for (app, label) in [
+            (&cask_app, "cask"),
+            (&user_app, "user"),
+            (&package_app, "package"),
+        ] {
+            make_owned_app_for_test(app, &format!("/{label}/sv"));
+        }
+        let install_target = root.join("target/Svartal CLI.app");
+        let missing = root.join("missing/Svartal CLI.app");
 
-        // An owned package handler wins...
+        // The candidates in priority order: the first owned one wins.
         assert_eq!(
-            resolve_default_app_from(Some(&owned_package), Some(&home)),
-            Some(owned_package.clone())
+            resolve_default_app_from(&[&cask_app, &user_app, &package_app], Some(&install_target)),
+            Some(cask_app.clone())
         );
-        // ...a package app that is not ours does not...
         assert_eq!(
-            resolve_default_app_from(Some(&foreign_package), Some(&home)),
+            resolve_default_app_from(&[&missing, &user_app, &package_app], Some(&install_target)),
             Some(user_app.clone())
         );
-        // ...and with no package app at all, the user's app is the answer.
-        assert_eq!(resolve_default_app_from(None, Some(&home)), Some(user_app));
-        assert_eq!(resolve_default_app_from(None, None), None);
+        assert_eq!(
+            resolve_default_app_from(&[&missing, &missing, &package_app], Some(&install_target)),
+            Some(package_app.clone())
+        );
+        // Nothing owned: the install target is the answer.
+        assert_eq!(
+            resolve_default_app_from(&[&missing, &missing], Some(&install_target)),
+            Some(install_target.clone())
+        );
+        assert_eq!(resolve_default_app_from(&[&missing, &missing], None), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_package_app_follows_the_opt_symlink_into_the_cellar() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "sv-browser-package-{}-{}",
+            std::process::id(),
+            crate::fsutil::random_suffix().expect("a suffix")
+        ));
+        // The system temporary directory is itself behind a symlink on
+        // macOS (`/var` → `/private/var`), so expectations are stated in the
+        // canonical spelling — which is the point of the function.
+        let cellar_bin = root.join("Cellar/svartal-cli/0.1.13/bin");
+        std::fs::create_dir_all(&cellar_bin).expect("Cellar bin");
+        std::fs::write(cellar_bin.join("sv"), b"#!/bin/sh\n").expect("sv");
+        let opt_bin = root.join("opt/svartal-cli/bin");
+        std::fs::create_dir_all(&opt_bin).expect("opt bin");
+        symlink(cellar_bin.join("sv"), opt_bin.join("sv")).expect("symlink");
+        let root = root.canonicalize().expect("the canonical root");
+
+        assert_eq!(
+            package_app_path_from(&opt_bin.join("sv")),
+            Some(root.join("Cellar/svartal-cli/0.1.13/Svartal CLI.app"))
+        );
+        // The un-canonicalized spelling would have named the prefix itself.
+        assert_ne!(
+            package_app_path_from(&opt_bin.join("sv")),
+            Some(root.join("opt/Svartal CLI.app"))
+        );
+        // A path that is not there has no package app.
+        assert_eq!(package_app_path_from(&opt_bin.join("nowhere")), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_usable_handler_with_a_different_client_is_left_alone() {
+        // A cask's handler names the matching CLI in its caskroom — a
+        // different, existing sv from the one asking. It is usable, and a
+        // login from any other sv must not count it as stale.
+        let root = std::env::temp_dir().join(format!(
+            "sv-browser-cask-{}-{}",
+            std::process::id(),
+            crate::fsutil::random_suffix().expect("a suffix")
+        ));
+        std::fs::create_dir_all(&root).expect("scratch directory");
+        let cask_client = root.join("Caskroom/svartal/0.1.14/sv");
+        std::fs::create_dir_all(cask_client.parent().expect("Caskroom")).expect("the caskroom");
+        std::fs::write(&cask_client, b"#!/bin/sh\n").expect("the cask's sv");
+        let cask_app = root.join("Applications/Svartal CLI.app");
+        make_owned_app_for_test(&cask_app, &cask_client.display().to_string());
+
+        assert!(is_owned_handler(&cask_app));
+        assert!(handler_is_usable(&cask_app));
+
+        // The handler whose recorded sv is gone is the broken one.
+        make_owned_app_for_test(
+            &root.join("gone/Svartal CLI.app"),
+            "/deleted/old-cellar/bin/sv",
+        );
+        assert!(!handler_is_usable(&root.join("gone/Svartal CLI.app")));
         let _ = std::fs::remove_dir_all(&root);
     }
 

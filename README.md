@@ -38,7 +38,7 @@ the source comments (`ID-9`, `ID-16`, `ID-25`, …) are that document's.
 | `name`                | Give a workspace a short word to type; `--remove` forgets one          |
 | `host up\|status\|down` | This computer as a Svartal machine: `up` registers it, starts the machine container (brok's host mode) and waits for your workspace; `status` and `down` do what they say; more than one machine can run on the same computer, one per `--instance`; `--image`, `--instance`, `--purge` |
 | `open-url <url>`     | macOS: handle an `sv://` link — validate it strictly and open a Terminal running `sv shell <id>`. The Svartal app runs this, not you; off macOS it is refused |
-| `browser install\|status\|uninstall` | macOS: the Svartal app that claims the `sv://` scheme, so the web app's open-shell buttons reach this machine. `--app-path` names a package-manager-owned `.app` instead of `~/Applications/Svartal CLI.app` |
+| `browser build\|install\|status\|uninstall` | macOS: the Svartal app that claims the `sv://` scheme, so the web app's open-shell buttons reach this machine. `--app-path` names a package-manager-owned `.app` instead of `~/Applications/Svartal CLI.app`; `build` makes the app without registering it — the Homebrew cask's preflight runs exactly that, with `--client` naming the `sv` the app runs |
 | bare `sv`             | On a terminal: the environment list, arrow keys, enter opens a shell. Off a terminal it prints the usage and exits 1 |
 
 `claude` has been run against a live workspace: an interactive Claude terminal
@@ -64,15 +64,22 @@ because they still say why the code is shaped the way it is:
 
 ## Install
 
-With Homebrew (macOS and Linux):
+With Homebrew on macOS, one command installs the terminal CLI, the `sv://`
+handler app, and the private runtime that compiles it:
 
 ```sh
-brew install svartal-cli/tap/sv
-brew upgrade sv        # on macOS, also refreshes the sv:// handler app
+brew install svartal-cli/tap/sv svartal-cli/tap/sv-browser-runtime svartal-cli/tap/sv-browser
 ```
 
-The macOS formula registers the `sv://` handler app automatically after
-install and upgrade; `sv login` keeps it fresh from then on.
+The cask depends on both formulas: the public `sv` puts `sv login` on `PATH`;
+the keg-only `sv-browser-runtime` is the version-matched `sv` the handler app
+is built with and runs, so an already-installed global `sv` is never replaced
+and never breaks the handler. When Homebrew first meets the tap and asks what
+to trust, trust the named packages above — not the whole tap. On Linux, or for
+the CLI alone: `brew install svartal-cli/tap/sv`.
+
+`brew upgrade` updates everything the tap installed, the handler app rebuilt
+for each release. Then a normal `sv login` once; nothing else to set up.
 
 From source:
 
@@ -127,15 +134,16 @@ window via a one-shot `.command` file that deletes itself and then runs
 app best effort, and says how to retry rather than fail the login.
 
 `sv browser uninstall` removes exactly that app (an app without sv's ownership
-marker is never touched); `--app-path` points the verbs at a package-manager
-install instead — Homebrew's formula runs
-`"#{opt_bin}/sv" browser install --app-path "#{opt_prefix}/Svartal CLI.app"`
-after installing `sv` (the opt prefix is stable across upgrades, and the
-sandboxed post-install may write the Cellar but not the user's home, so no
-`~/Applications` fallback is read for an explicit `--app-path`). When such an
-owned handler sits beside this `sv`, the bare verbs and `sv login` defer to it.
-Off macOS both commands are explicitly unsupported; `sv shell <id>` is the same
-job.
+marker is never touched). The Homebrew cask builds the handler in its preflight
+with the keg-only `sv-browser-runtime` formula — the same release's CLI,
+installed the standard trusted formula way and invisible to `PATH`, so the
+first cask install always has the new `browser build --app-path … --client …`
+API even when the global `sv` is older, and the two installs never touch each
+other. The cask's own download is a tiny non-executable manifest archive, so
+no quarantined binary is ever executed from staging; installing the built app
+as a normal application performs the registration, and every `brew upgrade`
+rebuilds it against the new runtime. Off macOS both commands are explicitly
+unsupported; `sv shell <id>` is the same job.
 
 Running `sv` with no command on a terminal shows the environments and connects
 a shell to the one you pick. Up and down (or `j` and `k`) move, enter connects,

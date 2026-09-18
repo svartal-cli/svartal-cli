@@ -293,6 +293,48 @@ fn a_failed_registration_keeps_the_finished_app() {
     assert!(is_owned_handler(&app));
 }
 
+// -- build: the package manager's verb --------------------------------------
+
+#[test]
+fn build_compiles_signs_and_marks_but_never_touches_launch_services() {
+    let root = TempDir::new("browser-build");
+    let app = root.path().join("Svartal CLI.app");
+    // Even a LaunchServices that would refuse everything changes nothing:
+    // build has no way to reach it.
+    let runner = FakeRunner::new();
+    runner.fail("lsregister", "registration refused");
+
+    assert_eq!(
+        browser_app::build(&runner, &app, "/opt/homebrew/bin/sv"),
+        Ok(InstallChange::Created)
+    );
+    assert_eq!(runner.programs(), ["osacompile", "codesign"]);
+    assert!(runner.calls_for("lsregister").is_empty());
+    assert_eq!(marker_of(&app), "/opt/homebrew/bin/sv");
+    assert!(is_owned_handler(&app));
+
+    // A second build replaces the owned app, still without registering.
+    assert_eq!(
+        browser_app::build(&runner, &app, "/opt/homebrew/bin/sv"),
+        Ok(InstallChange::Replaced)
+    );
+    assert_eq!(runner.calls_for("codesign").len(), 2);
+    assert!(runner.calls_for("lsregister").is_empty());
+}
+
+#[test]
+fn build_refuses_an_app_it_does_not_own() {
+    let root = TempDir::new("browser-build-foreign");
+    let app = root.path().join("Svartal CLI.app");
+    write_foreign_app(&app);
+    let runner = FakeRunner::new();
+
+    let error = browser_app::build(&runner, &app, "/opt/homebrew/bin/sv").expect_err("refused");
+    assert!(error.0.contains("was not installed by sv"), "{error}");
+    assert!(app.join("Contents/Info.plist").is_file());
+    assert!(runner.calls().is_empty());
+}
+
 // -- uninstall -------------------------------------------------------------
 
 #[test]
@@ -395,27 +437,69 @@ fn browser_command_validates_before_touching_anything() {
     // These paths stop before any system tool is run.
     let mut out = Vec::new();
 
-    let error =
-        browser_app::browser_command(&mut out, Some("dance"), None).expect_err("unknown verb");
+    let error = browser_app::browser_command(&mut out, Some("dance"), None, None)
+        .expect_err("unknown verb");
     assert!(
         error.0.contains("`sv browser dance` is not a thing"),
         "{error}"
     );
-    let error = browser_app::browser_command(&mut out, None, None).expect_err("no verb");
+    let error = browser_app::browser_command(&mut out, None, None, None).expect_err("no verb");
     assert!(
-        error.0.contains("needs one of: install, status, uninstall"),
+        error.0.contains("needs one of: install, build, status, uninstall"),
         "{error}"
     );
-    let error = browser_app::browser_command(&mut out, Some("install"), Some("relative/App.app"))
+    let error = browser_app::browser_command(&mut out, Some("install"), Some("relative/App.app"), None)
         .expect_err("relative path");
     assert!(error.0.contains("absolute"), "{error}");
     let error = browser_app::browser_command(
         &mut out,
         Some("install"),
         Some("/opt/homebrew/opt/svartal-cli"),
+        None,
     )
     .expect_err("not an .app bundle");
     assert!(error.0.contains(".app bundle"), "{error}");
+
+    // `build` is the package manager's verb: both arguments are its own.
+    let error = browser_app::browser_command(&mut out, Some("build"), None, None)
+        .expect_err("build needs a client");
+    assert!(error.0.contains("needs --client"), "{error}");
+    let error = browser_app::browser_command(
+        &mut out,
+        Some("build"),
+        Some("/opt/homebrew/opt/svartal-cli/Svartal CLI.app"),
+        None,
+    )
+    .expect_err("build without a client");
+    assert!(error.0.contains("needs --client"), "{error}");
+    let error = browser_app::browser_command(&mut out, Some("build"), None, Some("/opt/homebrew/bin/sv"))
+        .expect_err("build without an app path");
+    assert!(error.0.contains("needs --app-path"), "{error}");
+    let error = browser_app::browser_command(
+        &mut out,
+        Some("build"),
+        Some("/opt/homebrew/opt/svartal-cli/Svartal CLI.app"),
+        Some("relative/sv"),
+    )
+    .expect_err("client must be absolute");
+    assert!(error.0.contains("--client needs the absolute path"), "{error}");
+    let error = browser_app::browser_command(
+        &mut out,
+        Some("build"),
+        Some("/opt/homebrew/opt/svartal-cli/Svartal CLI.app"),
+        Some("/definitely/not/here/sv"),
+    )
+    .expect_err("client must exist");
+    assert!(error.0.contains("existing sv"), "{error}");
+    // The other verbs pick their own sv.
+    let error = browser_app::browser_command(
+        &mut out,
+        Some("install"),
+        Some("/opt/homebrew/opt/svartal-cli/Svartal CLI.app"),
+        Some("/opt/homebrew/bin/sv"),
+    )
+    .expect_err("client is build-only");
+    assert!(error.0.contains("--client is a `sv browser build` option"), "{error}");
 }
 
 #[test]
@@ -437,7 +521,7 @@ fn open_url_is_explicitly_macos_only() {
     assert!(error.0.contains("macOS feature"), "{error}");
     assert!(error.0.contains("sv shell env-1"), "{error}");
 
-    let error = browser_app::browser_command(&mut Vec::new(), Some("install"), None)
+    let error = browser_app::browser_command(&mut Vec::new(), Some("install"), None, None)
         .expect_err("unsupported");
     assert!(error.0.contains("macOS feature"), "{error}");
 }
