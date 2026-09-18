@@ -15,8 +15,10 @@
 pub mod add;
 pub mod api;
 pub mod browser;
+pub mod browser_app;
 pub mod commands;
 pub mod config;
+pub mod deeplink;
 pub mod dpop;
 pub mod fsutil;
 pub mod host;
@@ -27,6 +29,7 @@ pub mod link;
 pub mod loopback;
 pub mod oidc;
 pub mod picker;
+pub mod proc;
 pub mod relay;
 pub mod rpc;
 pub mod shell;

@@ -55,6 +55,13 @@ Commands:
                      `issue unlink` detaches it. The bundle is not changed.
   issue transcript   Save a conversation transcript (JSON) on a project, for
                      audit, attached to an issue and bundles when named.
+  open-url <url>     Handle an sv:// shell link (sv://shell?environmentId=…):
+                     check it and open a Terminal running that shell. macOS
+                     only; the Svartal app runs this, not you.
+  browser install    Install the Svartal app that hands sv:// links to this
+                     sv, so the web app's Open-shell buttons reach this
+                     machine. browser status reports on it; browser uninstall
+                     removes it. macOS only.
 
 A target is a short name, a workspace id, a workspace name, or a machine name.
 
@@ -104,6 +111,9 @@ Options:
   --agent <name>     The agent that wrote the post, for the provenance note;
                      defaults to $SV_AGENT (issue).
   --thread <id>      The conversation thread the post came from (issue).
+  --app-path <path>  Where the Svartal app lives (browser). Default
+                     ~/Applications/Svartal CLI.app; a package manager passes
+                     its own prefix. Absolute, ending in .app.
   -h, --help         Show this message.
   -V, --version      Show the version.
 ";
@@ -164,6 +174,8 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "host" => &["--image", "--instance", "--name", "--purge"],
         "machines" | "envs" => &["--json", "--all"],
         "whoami" | "sessions" => &["--json"],
+        "browser" => &["--app-path"],
+        "open-url" => &[],
         "issue" => &[
             "--json",
             "--project",
@@ -204,6 +216,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut work_item: Option<String> = None;
     let mut agent: Option<String> = None;
     let mut thread: Option<String> = None;
+    let mut app_path: Option<String> = None;
     let mut positional: Vec<&str> = Vec::new();
     // `sv` with nothing after it has no argument list to walk, not even an
     // empty one: the command itself is the missing element.
@@ -293,8 +306,42 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             "--work-item" => work_item = Some(flag_value(&mut rest, "--work-item needs an issue number, like #12.")?),
             "--agent" => agent = Some(flag_value(&mut rest, "--agent needs the agent's name.")?),
             "--thread" => thread = Some(flag_value(&mut rest, "--thread needs a thread id.")?),
+            "--app-path" => {
+                app_path = Some(flag_value(&mut rest, "--app-path needs the .app's absolute path.")?)
+            }
             _ => {}
         }
+    }
+
+    // The sv:// half of this CLI carries no authority and needs none: a link
+    // names an environment and nothing else, and the app that handles it is
+    // this machine's business alone. Both verbs answer before the config and
+    // the credential are even loaded, so nothing on the account side can
+    // refuse a link.
+    if command == "open-url" {
+        if positional.len() != 1 {
+            return Err(
+                "`sv open-url` needs exactly one sv:// URL, the one the Svartal app hands it.".to_string(),
+            );
+        }
+        return svartal::deeplink::open_url_command(&mut stdout, positional[0])
+            .map(|()| 0)
+            .map_err(|error| error.to_string());
+    }
+    if command == "browser" {
+        if positional.len() > 1 {
+            return Err(format!(
+                "`sv browser {}` takes no further arguments.",
+                positional[0]
+            ));
+        }
+        return svartal::browser_app::browser_command(
+            &mut stdout,
+            positional.first().copied(),
+            app_path.as_deref(),
+        )
+        .map(|()| 0)
+        .map_err(|error| error.to_string());
     }
 
     let environment = environment_from_process();
@@ -312,7 +359,18 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         // Nothing was typed and this is a terminal: show the environments and
         // connect a shell to the one that is picked.
         "" => commands::pick_and_open_shell(&context, &mut stdout),
-        "login" => commands::login(&context, &mut stdout),
+        // The sv:// handler registration belongs to this boundary, not the
+        // library: both successful login outcomes — a fresh sign-in and
+        // "already signed in", which is how an upgraded binary first meets an
+        // existing credential — set the links up, a failed one never does,
+        // and only a person at a terminal gets an app installed.
+        "login" => {
+            let outcome = commands::login(&context, &mut stdout);
+            if outcome.is_ok() && svartal::terminal::is_interactive() {
+                svartal::browser_app::ensure_registered_after_login(&mut stdout);
+            }
+            outcome
+        }
         "logout" => commands::logout(&context, &mut stdout),
         "whoami" => commands::whoami(&context, &mut stdout, json),
         "machines" => commands::machines(&context, &mut stdout, json, all),
