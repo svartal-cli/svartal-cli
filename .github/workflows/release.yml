@@ -18,6 +18,19 @@ jobs:
       - uses: taiki-e/create-gh-release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      # The sv-browser cask downloads a separate, non-executable manifest
+      # archive: sharing the CLI tarball with the runtime formula let
+      # quarantine contaminate the cached download and kill the formula
+      # binary. Built from the checkout so the exact bytes are testable.
+      - name: Upload the cask manifest asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python3 scripts/build_homebrew_browser_asset.py "$version" assets
+          gh release upload "${GITHUB_REF_NAME}" --clobber \
+            "assets/sv-v${version}-browser.tar.gz" \
+            "assets/sv-v${version}-browser.sha256"
 
   upload-assets:
     needs: create-release
@@ -99,19 +112,19 @@ jobs:
 
           python3 ../scripts/update_homebrew_formula.py Formula/sv.rb "${version}" ../shas
 
-          if git diff --quiet; then
-            echo "::notice::Homebrew formula already points at ${version}."
+          git add Formula/sv.rb Formula/sv-browser-runtime.rb Casks/sv-browser.rb
+          if git diff --cached --quiet; then
+            echo "::notice::Homebrew formula, runtime, and cask already point at ${version}."
             exit 0
           fi
 
           git config user.name "sv-release-bot"
           git config user.email "release-bot@users.noreply.github.com"
-          git add Formula/sv.rb
           git commit -m "sv ${version}"
           git push -u origin "${branch}"
           gh pr create \
             --repo "${TAP_REPO}" \
             --title "sv ${version}" \
-            --body "Automated formula bump for sv ${version}." \
+            --body "Automated formula, runtime, and cask bump for sv ${version}." \
             --head "${branch}" \
             --base main

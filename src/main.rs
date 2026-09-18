@@ -61,7 +61,8 @@ Commands:
   browser install    Install the Svartal app that hands sv:// links to this
                      sv, so the web app's Open-shell buttons reach this
                      machine. browser status reports on it; browser uninstall
-                     removes it. macOS only.
+                     removes it. browser build compiles the app for a package
+                     manager without registering it. macOS only.
 
 A target is a short name, a workspace id, a workspace name, or a machine name.
 
@@ -114,6 +115,8 @@ Options:
   --app-path <path>  Where the Svartal app lives (browser). Default
                      ~/Applications/Svartal CLI.app; a package manager passes
                      its own prefix. Absolute, ending in .app.
+  --client <path>    The sv a built app runs (browser build), as an absolute
+                     path. Default elsewhere: this sv.
   -h, --help         Show this message.
   -V, --version      Show the version.
 ";
@@ -174,7 +177,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "host" => &["--image", "--instance", "--name", "--purge"],
         "machines" | "envs" => &["--json", "--all"],
         "whoami" | "sessions" => &["--json"],
-        "browser" => &["--app-path"],
+        "browser" => &["--app-path", "--client"],
         "open-url" => &[],
         "issue" => &[
             "--json",
@@ -217,6 +220,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut agent: Option<String> = None;
     let mut thread: Option<String> = None;
     let mut app_path: Option<String> = None;
+    let mut client: Option<String> = None;
     let mut positional: Vec<&str> = Vec::new();
     // `sv` with nothing after it has no argument list to walk, not even an
     // empty one: the command itself is the missing element.
@@ -309,6 +313,9 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             "--app-path" => {
                 app_path = Some(flag_value(&mut rest, "--app-path needs the .app's absolute path.")?)
             }
+            "--client" => {
+                client = Some(flag_value(&mut rest, "--client needs the sv to build the app for.")?)
+            }
             _ => {}
         }
     }
@@ -339,6 +346,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             &mut stdout,
             positional.first().copied(),
             app_path.as_deref(),
+            client.as_deref(),
         )
         .map(|()| 0)
         .map_err(|error| error.to_string());

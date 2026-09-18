@@ -17,9 +17,10 @@
 #
 # Homebrew: the Release workflow only opens a tap pull request when a
 # HOMEBREW_TAP_TOKEN secret exists, and reports success either way, so this
-# script writes the formula itself with the person's own GitHub access: the
-# release assets' checksums go into Formula/sv.rb on the tap's main. A landing
-# that says deployed means `brew upgrade sv` already works.
+# script writes the tap itself with the person's own GitHub access: the
+# release assets' checksums go into Formula/sv.rb, Formula/sv-browser-runtime.rb
+# and Casks/sv-browser.rb on the tap's main. A landing that says deployed
+# means `brew upgrade` already works.
 set -e
 
 root="${KNIT_ROOT:?KNIT_ROOT is not set}"
@@ -101,27 +102,34 @@ gh run watch --repo svartal-cli/svartal-cli "$run_id" --exit-status --interval 2
 }
 gh release view --repo svartal-cli/svartal-cli "$tag" --json url,assets -q '"Released \(.url) with \(.assets | length) assets."'
 
-# Homebrew: write the formula on the tap's main from the release checksums.
+# Homebrew: write the formula, the private runtime, and the cask on the tap's
+# main from the release checksums; every one of the three versions must land,
+# so a missing file reruns the update.
 tap="svartal-cli/homebrew-tap"
-formula_version() {
-  gh api "repos/$tap/contents/Formula/sv.rb" -q .content | base64 -d | sed -n 's/^ *version "\([^"]*\)".*/\1/p' | head -n 1
+tap_version() {
+  gh api "repos/$tap/contents/$1" -q .content 2>/dev/null | base64 -d | sed -n 's/^ *version "\([^"]*\)".*/\1/p' | head -n 1
 }
-if [ "$(formula_version)" = "$version" ]; then
-  echo "Homebrew formula already points at sv $version."
+tap_up_to_date() {
+  [ "$(tap_version "Formula/sv.rb")" = "$version" ] &&
+    [ "$(tap_version "Formula/sv-browser-runtime.rb")" = "$version" ] &&
+    [ "$(tap_version "Casks/sv-browser.rb")" = "$version" ]
+}
+if tap_up_to_date; then
+  echo "Homebrew formula, runtime, and cask already point at sv $version."
 else
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' EXIT
-  echo "Updating the Homebrew formula to sv $version..."
+  echo "Updating the Homebrew formula, runtime, and cask to sv $version..."
   gh release download --repo svartal-cli/svartal-cli "$tag" --pattern "*.sha256" --dir "$work/shas"
   gh repo clone "$tap" "$work/tap" -- -q
   python3 "$repo/scripts/update_homebrew_formula.py" "$work/tap/Formula/sv.rb" "$version" "$work/shas"
-  git -C "$work/tap" add Formula/sv.rb
+  git -C "$work/tap" add Formula/sv.rb Formula/sv-browser-runtime.rb Casks/sv-browser.rb
   git -C "$work/tap" -c user.name="sv-release" -c user.email="release@svartal.com" commit -q -m "sv $version"
   git -C "$work/tap" push -q origin HEAD:main
 fi
-if [ "$(formula_version)" = "$version" ]; then
-  echo "sv $tag released; \`brew upgrade sv\` installs it."
+if tap_up_to_date; then
+  echo "sv $tag released; \`brew upgrade\` updates the CLI, the private runtime, and the handler app."
 else
-  echo "deploy-svartal-cli: the tap formula does not point at $version after the update." >&2
+  echo "deploy-svartal-cli: the tap formula, runtime, or cask does not point at $version after the update." >&2
   exit 1
 fi
