@@ -48,6 +48,9 @@ Commands:
   host status        Show the machine container and your workspace on it, for
                      every machine on this computer or one --instance of them.
   host down          Stop hosting; --purge also deletes the machine's state.
+  project visibility <project> [public|private]
+                     Show or change who can see a project (slug or id).
+                     Only its owner can change it.
   issue post         Post an issue, bug, chore, investigation, idea or plan to
                      a Svartal project, as you, with a note naming the agent.
   issue link #N <bundle>
@@ -352,6 +355,12 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         .map_err(|error| error.to_string());
     }
 
+    let project_visibility = if command == "project" {
+        Some(svartal::project::parse_visibility_args(&positional)?)
+    } else {
+        None
+    };
+
     let environment = environment_from_process();
     let config = resolve_config(&environment).map_err(|error| error.to_string())?;
     let http = UreqTransport::new();
@@ -463,6 +472,10 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             )
         }
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
+        "project" => {
+            let (project, visibility) = project_visibility.expect("validated project arguments");
+            svartal::project::visibility(&context, &mut stdout, project, visibility)
+        }
         "issue" => {
             let verb = positional.first().copied();
             if verb.is_none() {
