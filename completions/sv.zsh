@@ -29,6 +29,7 @@ _sv() {
     'shell:Open a shell in a workspace you can reach'
     'claude:Open an interactive Claude terminal in a workspace'
     'close:End a shell or Claude terminal without attaching to it'
+    'project:Show or change project visibility'
     'help:Show the usage'
   )
 
@@ -38,6 +39,13 @@ _sv() {
   fi
 
   case $words[2] in
+    project)
+      if (( CURRENT == 3 )); then
+        compadd visibility
+      elif [[ $words[3] == visibility ]] && (( CURRENT == 5 )); then
+        compadd public private
+      fi
+      ;;
     login)
       _arguments '--no-browser[print the sign-in URL instead of opening a browser]'
       ;;
