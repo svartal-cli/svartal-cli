@@ -48,6 +48,10 @@ Commands:
   host status        Show the machine container and your workspace on it, for
                      every machine on this computer or one --instance of them.
   host down          Stop hosting; --purge also deletes the machine's state.
+  project transfer <project> --to-user <username> | --to-org <organization>
+                     Hand a personal project you own to another person, or
+                     move it into an organization you administer. You keep
+                     push access.
   issue post         Post an issue, bug, chore, investigation, idea or plan to
                      a Svartal project, as you, with a note naming the agent.
   issue link #N <bundle>
@@ -99,6 +103,9 @@ Options:
                      first (ssh-setup).
   --user <account>   The account to log in as (ssh-setup). Default svartal; a
                      personal machine uses its own user.
+  --to-user <name>   The person who becomes the owner (project transfer).
+  --to-org <slug>    The organization that becomes the owner (project
+                     transfer). You must administer it.
   --project <p>      The Svartal project, as owner/slug or id (issue).
   --kind <kind>      issue, bug, chore, investigation, idea or plan (issue
                      post).
@@ -179,6 +186,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "whoami" | "sessions" => &["--json"],
         "browser" => &["--app-path", "--client"],
         "open-url" => &[],
+        "project" => &["--to-user", "--to-org"],
         "issue" => &[
             "--json",
             "--project",
@@ -221,6 +229,8 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut thread: Option<String> = None;
     let mut app_path: Option<String> = None;
     let mut client: Option<String> = None;
+    let mut to_user: Option<String> = None;
+    let mut to_org: Option<String> = None;
     let mut positional: Vec<&str> = Vec::new();
     // `sv` with nothing after it has no argument list to walk, not even an
     // empty one: the command itself is the missing element.
@@ -310,6 +320,8 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             "--work-item" => work_item = Some(flag_value(&mut rest, "--work-item needs an issue number, like #12.")?),
             "--agent" => agent = Some(flag_value(&mut rest, "--agent needs the agent's name.")?),
             "--thread" => thread = Some(flag_value(&mut rest, "--thread needs a thread id.")?),
+            "--to-user" => to_user = Some(flag_value(&mut rest, "--to-user needs the new owner's username.")?),
+            "--to-org" => to_org = Some(flag_value(&mut rest, "--to-org needs the organization's slug.")?),
             "--app-path" => {
                 app_path = Some(flag_value(&mut rest, "--app-path needs the .app's absolute path.")?)
             }
@@ -351,6 +363,16 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         .map(|()| 0)
         .map_err(|error| error.to_string());
     }
+
+    let project_transfer = if command == "project" {
+        Some(svartal::project_transfer::parse_transfer_args(
+            &positional,
+            to_user.as_deref(),
+            to_org.as_deref(),
+        )?)
+    } else {
+        None
+    };
 
     let environment = environment_from_process();
     let config = resolve_config(&environment).map_err(|error| error.to_string())?;
@@ -463,6 +485,10 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             )
         }
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
+        "project" => {
+            let (project, recipient) = project_transfer.expect("validated project arguments");
+            svartal::project_transfer::transfer(&context, &mut stdout, project, recipient)
+        }
         "issue" => {
             let verb = positional.first().copied();
             if verb.is_none() {

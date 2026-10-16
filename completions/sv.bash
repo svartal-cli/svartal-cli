@@ -18,7 +18,7 @@ _sv() {
   local command=${COMP_WORDS[1]}
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=($(compgen -W "login logout whoami machines envs add name sessions shell claude close help" -- "$cur"))
+    COMPREPLY=($(compgen -W "login logout whoami machines envs add name sessions shell claude close project help" -- "$cur"))
     return
   fi
 
@@ -31,12 +31,18 @@ _sv() {
       add) flags="--json --origin --publish-only --print-token --token-file" ;;
       name) flags="--remove" ;;
       shell|claude|close) flags="--terminal-id" ;;
+      project) flags="--to-user --to-org" ;;
     esac
     COMPREPLY=($(compgen -W "$flags" -- "$cur"))
     return
   fi
 
   case $command in
+    project)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=($(compgen -W "transfer" -- "$cur"))
+      fi
+      ;;
     shell|claude|sessions)
       COMPREPLY=($(compgen -W "$(_sv_shortnames)" -- "$cur"))
       ;;
