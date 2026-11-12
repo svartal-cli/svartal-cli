@@ -29,7 +29,7 @@ _sv() {
     'shell:Open a shell in a workspace you can reach'
     'claude:Open an interactive Claude terminal in a workspace'
     'close:End a shell or Claude terminal without attaching to it'
-    'project:Show or change project visibility'
+    'project:Show or change project visibility, or hand a project over'
     'help:Show the usage'
   )
 
@@ -41,9 +41,13 @@ _sv() {
   case $words[2] in
     project)
       if (( CURRENT == 3 )); then
-        compadd visibility
+        compadd visibility transfer
       elif [[ $words[3] == visibility ]] && (( CURRENT == 5 )); then
         compadd public private
+      elif [[ $words[3] == transfer ]]; then
+        _arguments '2:verb:(transfer)' '3:project:' \
+          '--to-user[the person who becomes the owner]:username:' \
+          '--to-org[the organization that becomes the owner]:organization:'
       fi
       ;;
     login)

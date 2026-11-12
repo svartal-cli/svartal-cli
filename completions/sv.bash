@@ -32,6 +32,7 @@ _sv() {
       add) flags="--json --origin --publish-only --print-token --token-file" ;;
       name) flags="--remove" ;;
       shell|claude|close) flags="--terminal-id" ;;
+      project) flags="--to-user --to-org" ;;
     esac
     COMPREPLY=($(compgen -W "$flags" -- "$cur"))
     return
@@ -40,7 +41,7 @@ _sv() {
   case $command in
     project)
       if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=($(compgen -W "visibility" -- "$cur"))
+        COMPREPLY=($(compgen -W "visibility transfer" -- "$cur"))
       elif [[ $COMP_CWORD -eq 4 && ${COMP_WORDS[2]} == visibility ]]; then
         COMPREPLY=($(compgen -W "public private" -- "$cur"))
       fi

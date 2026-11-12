@@ -51,6 +51,10 @@ Commands:
   project visibility <project> [public|private]
                      Show or change who can see a project (slug or id).
                      Only its owner can change it.
+  project transfer <project> --to-user <username> | --to-org <organization>
+                     Hand a personal project you own to another person, or
+                     move it into an organization you administer. You keep
+                     push access.
   issue post         Post an issue, bug, chore, investigation, idea or plan to
                      a Svartal project, as you, with a note naming the agent.
   issue link #N <bundle>
@@ -102,6 +106,9 @@ Options:
                      first (ssh-setup).
   --user <account>   The account to log in as (ssh-setup). Default svartal; a
                      personal machine uses its own user.
+  --to-user <name>   The person who becomes the owner (project transfer).
+  --to-org <slug>    The organization that becomes the owner (project
+                     transfer). You must administer it.
   --project <p>      The Svartal project, as owner/slug or id (issue).
   --kind <kind>      issue, bug, chore, investigation, idea or plan (issue
                      post).
@@ -123,6 +130,14 @@ Options:
   -h, --help         Show this message.
   -V, --version      Show the version.
 ";
+
+const PROJECT_USAGE: &str = "Usage: sv project visibility <project> [public|private]
+       sv project transfer <project> --to-user <username> | --to-org <organization>";
+
+enum ProjectCommand<'a> {
+    Visibility(&'a str, Option<&'a str>),
+    Transfer(&'a str, svartal::project_transfer::Recipient<'a>),
+}
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -182,6 +197,7 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         "whoami" | "sessions" => &["--json"],
         "browser" => &["--app-path", "--client"],
         "open-url" => &[],
+        "project" => &["--to-user", "--to-org"],
         "issue" => &[
             "--json",
             "--project",
@@ -224,6 +240,8 @@ fn run(arguments: &[String]) -> Result<u8, String> {
     let mut thread: Option<String> = None;
     let mut app_path: Option<String> = None;
     let mut client: Option<String> = None;
+    let mut to_user: Option<String> = None;
+    let mut to_org: Option<String> = None;
     let mut positional: Vec<&str> = Vec::new();
     // `sv` with nothing after it has no argument list to walk, not even an
     // empty one: the command itself is the missing element.
@@ -313,6 +331,8 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             "--work-item" => work_item = Some(flag_value(&mut rest, "--work-item needs an issue number, like #12.")?),
             "--agent" => agent = Some(flag_value(&mut rest, "--agent needs the agent's name.")?),
             "--thread" => thread = Some(flag_value(&mut rest, "--thread needs a thread id.")?),
+            "--to-user" => to_user = Some(flag_value(&mut rest, "--to-user needs the new owner's username.")?),
+            "--to-org" => to_org = Some(flag_value(&mut rest, "--to-org needs the organization's slug.")?),
             "--app-path" => {
                 app_path = Some(flag_value(&mut rest, "--app-path needs the .app's absolute path.")?)
             }
@@ -355,8 +375,27 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         .map_err(|error| error.to_string());
     }
 
-    let project_visibility = if command == "project" {
-        Some(svartal::project::parse_visibility_args(&positional)?)
+    let project_command = if command == "project" {
+        Some(match positional.first().copied() {
+            Some("transfer") => {
+                let (project, recipient) = svartal::project_transfer::parse_transfer_args(
+                    &positional,
+                    to_user.as_deref(),
+                    to_org.as_deref(),
+                )?;
+                ProjectCommand::Transfer(project, recipient)
+            }
+            Some("visibility") => {
+                if to_user.is_some() || to_org.is_some() {
+                    return Err(
+                        "--to-user and --to-org only go with `sv project transfer`.".to_string()
+                    );
+                }
+                let (project, visibility) = svartal::project::parse_visibility_args(&positional)?;
+                ProjectCommand::Visibility(project, visibility)
+            }
+            _ => return Err(PROJECT_USAGE.to_string()),
+        })
     } else {
         None
     };
@@ -472,10 +511,14 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             )
         }
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
-        "project" => {
-            let (project, visibility) = project_visibility.expect("validated project arguments");
-            svartal::project::visibility(&context, &mut stdout, project, visibility)
-        }
+        "project" => match project_command.expect("validated project arguments") {
+            ProjectCommand::Visibility(project, visibility) => {
+                svartal::project::visibility(&context, &mut stdout, project, visibility)
+            }
+            ProjectCommand::Transfer(project, recipient) => {
+                svartal::project_transfer::transfer(&context, &mut stdout, project, recipient)
+            }
+        },
         "issue" => {
             let verb = positional.first().copied();
             if verb.is_none() {

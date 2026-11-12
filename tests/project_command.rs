@@ -443,7 +443,7 @@ fn completions_offer_verb_and_values_at_the_correct_positions() {
             r#"
         source completions/sv.bash
         COMP_WORDS=(sv project ''); COMP_CWORD=2; _sv
-        [[ ${COMPREPLY[*]} == visibility ]] || exit 1
+        [[ ${COMPREPLY[*]} == 'visibility transfer' ]] || exit 1
         COMP_WORDS=(sv project visibility demo ''); COMP_CWORD=4; _sv
         [[ ${COMPREPLY[*]} == 'public private' ]] || exit 2
         COMP_WORDS=(sv project visibility ''); COMP_CWORD=3; _sv
