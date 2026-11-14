@@ -48,6 +48,9 @@ Commands:
   host status        Show the machine container and your workspace on it, for
                      every machine on this computer or one --instance of them.
   host down          Stop hosting; --purge also deletes the machine's state.
+  project visibility <project> [public|private]
+                     Show or change who can see a project (slug or id).
+                     Only its owner can change it.
   project transfer <project> --to-user <username> | --to-org <organization>
                      Hand a personal project you own to another person, or
                      move it into an organization you administer. You keep
@@ -127,6 +130,14 @@ Options:
   -h, --help         Show this message.
   -V, --version      Show the version.
 ";
+
+const PROJECT_USAGE: &str = "Usage: sv project visibility <project> [public|private]
+       sv project transfer <project> --to-user <username> | --to-org <organization>";
+
+enum ProjectCommand<'a> {
+    Visibility(&'a str, Option<&'a str>),
+    Transfer(&'a str, svartal::project_transfer::Recipient<'a>),
+}
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -364,12 +375,27 @@ fn run(arguments: &[String]) -> Result<u8, String> {
         .map_err(|error| error.to_string());
     }
 
-    let project_transfer = if command == "project" {
-        Some(svartal::project_transfer::parse_transfer_args(
-            &positional,
-            to_user.as_deref(),
-            to_org.as_deref(),
-        )?)
+    let project_command = if command == "project" {
+        Some(match positional.first().copied() {
+            Some("transfer") => {
+                let (project, recipient) = svartal::project_transfer::parse_transfer_args(
+                    &positional,
+                    to_user.as_deref(),
+                    to_org.as_deref(),
+                )?;
+                ProjectCommand::Transfer(project, recipient)
+            }
+            Some("visibility") => {
+                if to_user.is_some() || to_org.is_some() {
+                    return Err(
+                        "--to-user and --to-org only go with `sv project transfer`.".to_string()
+                    );
+                }
+                let (project, visibility) = svartal::project::parse_visibility_args(&positional)?;
+                ProjectCommand::Visibility(project, visibility)
+            }
+            _ => return Err(PROJECT_USAGE.to_string()),
+        })
     } else {
         None
     };
@@ -485,10 +511,14 @@ fn run(arguments: &[String]) -> Result<u8, String> {
             )
         }
         "sessions" => commands::sessions(&context, &mut stdout, json, positional.first().copied()),
-        "project" => {
-            let (project, recipient) = project_transfer.expect("validated project arguments");
-            svartal::project_transfer::transfer(&context, &mut stdout, project, recipient)
-        }
+        "project" => match project_command.expect("validated project arguments") {
+            ProjectCommand::Visibility(project, visibility) => {
+                svartal::project::visibility(&context, &mut stdout, project, visibility)
+            }
+            ProjectCommand::Transfer(project, recipient) => {
+                svartal::project_transfer::transfer(&context, &mut stdout, project, recipient)
+            }
+        },
         "issue" => {
             let verb = positional.first().copied();
             if verb.is_none() {

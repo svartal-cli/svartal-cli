@@ -27,6 +27,7 @@ pub mod issue;
 pub mod jwt;
 pub mod link;
 pub mod loopback;
+pub mod project;
 pub mod oidc;
 pub mod project_transfer;
 pub mod picker;

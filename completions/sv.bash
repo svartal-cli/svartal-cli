@@ -16,6 +16,7 @@ _sv_shortnames() {
 _sv() {
   local cur=${COMP_WORDS[COMP_CWORD]}
   local command=${COMP_WORDS[1]}
+  COMPREPLY=()
 
   if [[ $COMP_CWORD -eq 1 ]]; then
     COMPREPLY=($(compgen -W "login logout whoami machines envs add name sessions shell claude close project help" -- "$cur"))
@@ -40,7 +41,9 @@ _sv() {
   case $command in
     project)
       if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=($(compgen -W "transfer" -- "$cur"))
+        COMPREPLY=($(compgen -W "visibility transfer" -- "$cur"))
+      elif [[ $COMP_CWORD -eq 4 && ${COMP_WORDS[2]} == visibility ]]; then
+        COMPREPLY=($(compgen -W "public private" -- "$cur"))
       fi
       ;;
     shell|claude|sessions)

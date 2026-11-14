@@ -408,6 +408,43 @@ pub fn api_request(
     body: Option<Value>,
     action: &str,
 ) -> Result<ApiReply, CliError> {
+    api_request_structured(context, method, path, body, action).map_err(|error| match error {
+        ApiRequestError::Http { status: 401 | 403, .. } =>
+            CliError::of(ApiError::Unauthorized { action: action.to_string() }),
+        other => other.into_cli_error(),
+    })
+}
+
+#[derive(Debug)]
+pub enum ApiRequestError {
+    Http { action: String, status: u16, detail: Option<String> },
+    Other(CliError),
+}
+
+impl ApiRequestError {
+    pub fn into_cli_error(self) -> CliError {
+        match self {
+            Self::Http { action, status: 401, .. } =>
+                CliError::of(ApiError::Unauthorized { action }),
+            Self::Http { action, status, detail } =>
+                CliError::of(ApiError::Refused { action, status, detail }),
+            Self::Other(error) => error,
+        }
+    }
+}
+
+impl From<CliError> for ApiRequestError {
+    fn from(error: CliError) -> Self { Self::Other(error) }
+}
+
+/// `api_request`, but leaves HTTP refusals for the caller to explain.
+pub fn api_request_structured(
+    context: &Context<'_>,
+    method: &'static str,
+    path: &str,
+    body: Option<Value>,
+    action: &str,
+) -> Result<ApiReply, ApiRequestError> {
     let url = format!("{}/api/v1{path}", context.config.api_base_url);
     let mut secret = ensure_api_token(context)?;
     let mut minted_again = false;
@@ -428,15 +465,12 @@ pub fn api_request(
             secret = mint_api_token(context)?.secret;
             continue;
         }
-        if response.status == 401 || response.status == 403 {
-            return Err(CliError::of(ApiError::Unauthorized { action: action.to_string() }));
-        }
         if !response.is_success() {
-            return Err(CliError::of(ApiError::Refused {
+            return Err(ApiRequestError::Http {
                 action: action.to_string(),
                 status: response.status,
                 detail: error_detail(&response.body),
-            }));
+            });
         }
         let value = if response.body.iter().all(u8::is_ascii_whitespace) {
             Value::Null
