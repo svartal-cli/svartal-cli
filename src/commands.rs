@@ -1506,6 +1506,12 @@ pub fn host_status(
         .ok();
         let status = host::host_status(context.http, &context.config.api_base_url, &session.access_token, &record.machine_id)
             .map_err(CliError::of)?;
+        // The machine's own software, before its workspace: a host that is
+        // behind explains more than a workspace that is ready.
+        let running = host::running_host_image(docker, instance);
+        for sentence in host::host_software_sentences(running.as_ref(), status.host_update.as_ref(), status.host_release.as_ref()) {
+            writeln!(out, "{sentence}").ok();
+        }
         writeln!(out, "{}", host::intent_sentence(status.workspace_intent.as_ref())).ok();
         // Whether the account reading this can see the workspace at all: the
         // one thing `sv machines` would disagree with the line above about.
